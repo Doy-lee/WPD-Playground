@@ -1511,10 +1511,10 @@ struct DqnMemStack
     };
 
     DqnMemTracker  tracker;         // Read: Metadata for managing ptr allocation
-    DqnMemAPI     *mem_api;          // Read: API used to add additional memory blocks to this stack.
+    DqnMemAPI     *mem_api;         // Read: API used to add additional memory blocks to this stack.
     Block         *block;           // Read: Memory block allocated for the stack
     u32            flags;           // Read
-    i32            tmp_region_count; // Read: The number of temp memory regions in use
+    i32            tmp_region_count;// Read: The number of temp memory regions in use
 
     DqnMemStack() = default;
 

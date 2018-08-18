@@ -322,6 +322,49 @@ void WPDEnumerateContentRecursively(Context *ctx, WPDReadSettings *read_settings
     }
 }
 
+bool ReadYesOrNoStdin(char const *yes_no_msg)
+{
+    for (char input_buf[8];;)
+    {
+        input_buf[0] = 0;
+        fprintf(stdout, "%s\n[Yes/Y/No/N]: ", yes_no_msg);
+        gets_s(input_buf, DQN_ARRAY_COUNT(input_buf) - 1);
+        char *input   = DqnChar_SkipWhitespace(input_buf);
+        int input_len = DqnStr_Len(input);
+
+        if (input_len == 3)
+        {
+            char const yes[] = "Yes";
+            if (DqnStr_Cmp(input, yes, DQN_CHAR_COUNT(yes), Dqn::IgnoreCase::Yes) == 0)
+                return true;
+            else
+                continue;
+        }
+
+        if (input_len == 2)
+        {
+            char const no[] = "No";
+            if (DqnStr_Cmp(input, no, DQN_CHAR_COUNT(no), Dqn::IgnoreCase::Yes) == 0)
+                return false;
+            else
+                continue;
+        }
+
+        if (input_len == 1)
+        {
+            char input_lower = DqnChar_ToLower(input[0]);
+            if (input_lower == 'y')
+            {
+                return true;
+            }
+            else if (input_lower == 'n')
+            {
+                return false;
+            }
+        }
+    }
+}
+
 int main(int, char)
 {
     global_tmp_allocator = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroClear::Yes, DqnMemStack::Flag::All);
@@ -344,10 +387,11 @@ int main(int, char)
         return 0;
     }
 
+    FileNode root       = {};
     state.opened_device = OpenPortableDevice(&ctx, state.chosen_device.device_id.str);
     {
         IPortableDevice *portable_device = state.opened_device.Get();
-        WPDReadSettings read_settings = {};
+        WPDReadSettings read_settings    = {};
         if (!WPDMakeReadSettings(&ctx, portable_device, &read_settings))
         {
             DQN_LOGGER_E(&ctx.logger, "Could not make WPDReadSettings");
@@ -364,7 +408,6 @@ int main(int, char)
                                          DqnMemStack::Flag::All);
         enum_ctx.logger = ctx.logger;
 
-        FileNode root    = {};
         isize enum_count = 0;
 
         f64 start = DqnTimer_NowInMs();
@@ -372,6 +415,113 @@ int main(int, char)
         f64 end = DqnTimer_NowInMs();
 
         fprintf(stdout, "Device recursively visited: %zu items and took: %5.2fs\n", enum_count, (f32)(end - start)/1000.0f);
+    }
+
+    FileNode *curr_node          = &root;
+    DqnFixedString2048 curr_path = {};
+    {
+        int name_utf8_len = 0;
+        char *name_utf8   = WCharToUTF8(&global_tmp_allocator, curr_node->name.str, &name_utf8_len);
+        curr_path.SprintfAppend("/%.*s", name_utf8_len, name_utf8);
+        global_tmp_allocator.Pop(name_utf8);
+        curr_node = root.child;
+    }
+
+    FileNode **node_array        = nullptr;
+    isize num_nodes              = 0;
+    bool recalc_file_sys_display = true;
+    bool exit_prompt             = false;
+    for (char input_buf[8]; !exit_prompt;)
+    {
+        input_buf[0] = 0;
+        if (recalc_file_sys_display)
+        {
+            if (node_array) global_tmp_allocator.Pop(node_array);
+            num_nodes = 0;
+
+            for (FileNode *node = curr_node; node; node = node->next)
+                ++num_nodes;
+
+            node_array = DQN_MEMSTACK_PUSH_ARRAY(&global_tmp_allocator, FileNode *, num_nodes);
+            isize node_index = 0;
+            for (FileNode *node = curr_node; node; node = node->next)
+                node_array[node_index++] = node;
+        }
+
+        fprintf(stdout, "\n");
+        fprintf(stdout, "Path: %.*s\n", curr_path.len, curr_path.str);
+
+        for (isize node_index = 0; node_index < num_nodes; node_index++)
+        {
+            FileNode *node = node_array[node_index];
+            fwprintf(stdout, L"  |--[%zu] %ws\n", node_index, node->name.str);
+        }
+
+        fprintf(stdout, "\na: Accept Current Directory | p: Previous Directory | [0-n]: Enter Directory\n");
+        fprintf(stdout, "\nSelect the next directory to enter: ");
+        gets_s(input_buf, DQN_ARRAY_COUNT(input_buf) - 1);
+
+        char *input     = DqnChar_SkipWhitespace(input_buf);
+        isize input_len = DqnStr_Len(input);
+
+        DqnFixedString2048 exit_msg = {};
+        char const *exit_msg_fmt    = "Would you like to accept the selected path: %.*s";
+
+        if (input_len == 1)
+        {
+            char input_lower = DqnChar_ToLower(input[0]);
+            if (input_lower == 'p' && curr_node->parent != &root)
+            {
+                char *fwd_slash = nullptr;
+                for (isize i = curr_path.len - 1; i >= 0; i--)
+                {
+                    if (curr_path.str[i] == '/')
+                    {
+                        fwd_slash = curr_path.str + i;
+                        break;
+                    }
+                }
+
+                DQN_ASSERT(fwd_slash);
+                curr_path.len = static_cast<int>(fwd_slash - curr_path.str);
+                curr_path.NullTerminate();
+
+                curr_node               = curr_node->parent;
+                recalc_file_sys_display = true;
+                continue;
+            }
+            else if (input_lower == 'a')
+            {
+                exit_msg.SprintfAppend(exit_msg_fmt, curr_path.len, curr_path.str);
+                exit_prompt = ReadYesOrNoStdin(exit_msg.str);
+            }
+        }
+
+        if (!DqnChar_IsDigit(input[0]))
+            continue;
+
+        int choice = (int)Dqn_StrToI64(input, DqnStr_Len(input));
+        if (choice >= 0 && choice < (int)num_nodes)
+        {
+            curr_node = node_array[choice];
+            int node_name_len = 0;
+            char *node_name = WCharToUTF8(&global_tmp_allocator, curr_node->name.str, &node_name_len);
+            curr_path.SprintfAppend("/%.*s", node_name_len, node_name);
+            global_tmp_allocator.Pop(node_name);
+
+            if (curr_node->child != nullptr)
+            {
+                curr_node               = curr_node->child;
+                recalc_file_sys_display = true;
+            }
+            else
+            {
+                exit_msg.SprintfAppend(exit_msg_fmt, curr_path.len, curr_path.str);
+                exit_prompt = ReadYesOrNoStdin(exit_msg.str);
+            }
+
+            continue;
+        }
     }
 
     return 0;
