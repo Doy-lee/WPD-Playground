@@ -1,0 +1,12 @@
+# Visual Studio cache/options directory
+.vs/
+
+# Misc
+tags
+*.ctm
+
+# Vim Swap Files
+*.swp
+
+# Binary Rubbish
+bin/*
