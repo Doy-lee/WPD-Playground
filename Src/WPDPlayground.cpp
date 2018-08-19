@@ -241,7 +241,7 @@ FILE_SCOPE bool WPDMakeReadSettings(Context *ctx, IPortableDevice *portable_devi
     return true;
 }
 
-void WPDEnumerateContentRecursively(Context *ctx, WPDReadSettings *read_settings, WCHAR const *parent_object_id, FileNode *file_node, isize *enum_count, int depth = 0)
+void WPDMakeFileTreeRecursively(Context *ctx, WPDReadSettings *read_settings, WCHAR const *parent_object_id, FileNode *file_node, isize *enum_count, int depth = 0)
 {
     (*enum_count)++;
     // Get the file name of the object
@@ -315,7 +315,7 @@ void WPDEnumerateContentRecursively(Context *ctx, WPDReadSettings *read_settings
                         child->parent = file_node;
                     }
 
-                    WPDEnumerateContentRecursively(ctx, read_settings, object_id_array[fetch_index], child, enum_count, depth + 1);
+                    WPDMakeFileTreeRecursively(ctx, read_settings, object_id_array[fetch_index], child, enum_count, depth + 1);
                     CoTaskMemFree(object_id_array[fetch_index]);
                 }
 
@@ -370,82 +370,31 @@ FILE_SCOPE bool PromptYesOrNoStdin(char const *yes_no_msg)
     }
 }
 
-int main(int, char)
+FileNode const *PromptSelectFile(FileNode const *root, DqnFixedString2048 *curr_path)
 {
-    global_tmp_allocator = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroClear::Yes, DqnMemStack::Flag::All);
-
-    Context ctx   = {};
-    ctx.allocator = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroClear::Yes, DqnMemStack::Flag::All);
-
-    HRESULT hresult = 0;
-    if (FAILED(hresult = CoInitializeEx(0, COINIT_SPEED_OVER_MEMORY)))
-    {
-        HANDLE_COM_ERROR(hresult, "CoInitializeEx", &ctx.logger);
-        return -1;
-    }
-
-    State state         = {};
-    state.chosen_device = PromptAndSelectPortableDeviceID(&ctx);
-    if (state.chosen_device.num_devices == 0)
-    {
-        fprintf(stdout, "There are no MTP devices to choose from.");
-        return 0;
-    }
-
-    FileNode root       = {};
-    state.opened_device = OpenPortableDevice(&ctx, state.chosen_device.device_id.str);
-    {
-        IPortableDevice *portable_device = state.opened_device.Get();
-        WPDReadSettings read_settings    = {};
-        if (!WPDMakeReadSettings(&ctx, portable_device, &read_settings))
-        {
-            DQN_LOGGER_E(&ctx.logger, "Could not make WPDReadSettings");
-            return -1;
-        }
-
-        isize enum_allocator_mem_size = DQN_MEGABYTE(16);
-        void *enum_allocator_memory   = DqnOS_VAlloc(enum_allocator_mem_size);
-
-        Context enum_ctx   = {};
-        enum_ctx.allocator = DqnMemStack(enum_allocator_memory,
-                                         enum_allocator_mem_size,
-                                         Dqn::ZeroClear::No,
-                                         DqnMemStack::Flag::All);
-        enum_ctx.logger = ctx.logger;
-
-        isize enum_count = 0;
-
-        f64 start = DqnTimer_NowInMs();
-        WPDEnumerateContentRecursively(&enum_ctx, &read_settings, WPD_DEVICE_OBJECT_ID, &root, &enum_count);
-        f64 end = DqnTimer_NowInMs();
-
-        fprintf(stdout, "Device recursively visited: %zu items and took: %5.2fs\n", enum_count, (f32)(end - start)/1000.0f);
-    }
-
-    FileNode *curr_node          = &root;
-    DqnFixedString2048 curr_path = {};
+    FileNode const *result = root;
     {
         int name_utf8_len = 0;
-        char *name_utf8   = WCharToUTF8(&global_tmp_allocator, curr_node->name.str, &name_utf8_len);
-        curr_path.SprintfAppend("/%.*s", name_utf8_len, name_utf8);
+        char *name_utf8   = WCharToUTF8(&global_tmp_allocator, result->name.str, &name_utf8_len);
+        curr_path->SprintfAppend("/%.*s", name_utf8_len, name_utf8);
         global_tmp_allocator.Pop(name_utf8);
-        curr_node = root.child;
+        result = root->child;
     }
 
-    bool exit_prompt         = false;
-    FileNode **index_to_node = nullptr;
+    bool exit_prompt               = false;
+    FileNode const **index_to_node = nullptr;
     for (char input_buf[8]; !exit_prompt; global_tmp_allocator.Pop(index_to_node), system("cls"))
     {
         input_buf[0]          = 0;
-        isize const num_nodes = curr_node->parent->num_children;
-        index_to_node         = DQN_MEMSTACK_PUSH_ARRAY(&global_tmp_allocator, FileNode *, num_nodes);
+        isize const num_nodes = result->parent->num_children;
+        index_to_node         = DQN_MEMSTACK_PUSH_ARRAY(&global_tmp_allocator, FileNode const *, num_nodes);
 
         // Print interactive display and generate index_to_node array
         {
             fprintf(stdout, "\n");
-            fprintf(stdout, "Path: %.*s\n", curr_path.len, curr_path.str);
+            fprintf(stdout, "Path: %.*s\n", curr_path->len, curr_path->str);
 
-            FileNode *node = curr_node;
+            FileNode const *node = result;
             for (isize node_index = 0; node_index < num_nodes; node_index++, node = node->next)
             {
                 index_to_node[node_index] = node;
@@ -471,28 +420,28 @@ int main(int, char)
         if (input_len == 1)
         {
             char input_lower = DqnChar_ToLower(input[0]);
-            if (input_lower == 'p' && curr_node->parent != &root)
+            if (input_lower == 'p' && result->parent != root)
             {
                 char *fwd_slash = nullptr;
-                for (isize i = curr_path.len - 1; i >= 0; i--)
+                for (isize i = curr_path->len - 1; i >= 0; i--)
                 {
-                    if (curr_path.str[i] == '/')
+                    if (curr_path->str[i] == '/')
                     {
-                        fwd_slash = curr_path.str + i;
+                        fwd_slash = curr_path->str + i;
                         break;
                     }
                 }
 
                 DQN_ASSERT(fwd_slash);
-                curr_path.len = static_cast<int>(fwd_slash - curr_path.str);
-                curr_path.NullTerminate();
+                curr_path->len = static_cast<int>(fwd_slash - curr_path->str);
+                curr_path->NullTerminate();
 
-                curr_node = curr_node->parent;
+                result = result->parent;
                 continue;
             }
             else if (input_lower == 'a')
             {
-                exit_msg.SprintfAppend(exit_msg_fmt, curr_path.len, curr_path.str);
+                exit_msg.SprintfAppend(exit_msg_fmt, curr_path->len, curr_path->str);
                 exit_prompt = PromptYesOrNoStdin(exit_msg.str);
             }
         }
@@ -502,24 +451,78 @@ int main(int, char)
             int choice = (int)Dqn_StrToI64(input, input_len);
             if (choice >= 0 && choice < (int)num_nodes)
             {
-                curr_node         = index_to_node[choice];
+                result         = index_to_node[choice];
                 int node_name_len = 0;
-                char *node_name   = WCharToUTF8(&global_tmp_allocator, curr_node->name.str, &node_name_len);
-                curr_path.SprintfAppend("/%.*s", node_name_len, node_name);
+                char *node_name   = WCharToUTF8(&global_tmp_allocator, result->name.str, &node_name_len);
+                curr_path->SprintfAppend("/%.*s", node_name_len, node_name);
                 global_tmp_allocator.Pop(node_name);
 
-                if (curr_node->child)
+                if (result->child)
                 {
-                    curr_node = curr_node->child;
+                    result = result->child;
                 }
                 else
                 {
-                    exit_msg.SprintfAppend(exit_msg_fmt, curr_path.len, curr_path.str);
+                    exit_msg.SprintfAppend(exit_msg_fmt, curr_path->len, curr_path->str);
                     exit_prompt = PromptYesOrNoStdin(exit_msg.str);
                 }
             }
         }
     }
+
+    return result;
+}
+
+int main(int, char)
+{
+    global_tmp_allocator = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroClear::Yes, DqnMemStack::Flag::All);
+
+    Context ctx   = {};
+    ctx.allocator = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroClear::Yes, DqnMemStack::Flag::All);
+
+    HRESULT hresult = 0;
+    if (FAILED(hresult = CoInitializeEx(0, COINIT_SPEED_OVER_MEMORY)))
+    {
+        HANDLE_COM_ERROR(hresult, "CoInitializeEx", &ctx.logger);
+        return -1;
+    }
+
+    State state         = {};
+    state.chosen_device = PromptAndSelectPortableDeviceID(&ctx);
+    if (state.chosen_device.num_devices == 0)
+    {
+        fprintf(stdout, "There are no MTP devices to choose from.");
+        return 0;
+    }
+
+    isize file_tree_allocator_mem_size = DQN_MEGABYTE(16);
+    void *file_tree_allocator_mem      = DqnOS_VAlloc(file_tree_allocator_mem_size);
+
+    Context file_tree_ctx   = {};
+    file_tree_ctx.allocator = DqnMemStack(file_tree_allocator_mem, file_tree_allocator_mem_size, Dqn::ZeroClear::No, DqnMemStack::Flag::All);
+    file_tree_ctx.logger    = ctx.logger;
+    FileNode root           = {};
+    {
+        state.opened_device              = OpenPortableDevice(&ctx, state.chosen_device.device_id.str);
+        IPortableDevice *portable_device = state.opened_device.Get();
+        WPDReadSettings read_settings    = {};
+        if (!WPDMakeReadSettings(&ctx, portable_device, &read_settings))
+        {
+            DQN_LOGGER_E(&ctx.logger, "Could not make WPDReadSettings");
+            return -1;
+        }
+
+        isize enum_count = 0;
+        f64 start = DqnTimer_NowInMs();
+        WPDMakeFileTreeRecursively(&file_tree_ctx, &read_settings, WPD_DEVICE_OBJECT_ID, &root, &enum_count);
+        f64 end = DqnTimer_NowInMs();
+
+        fprintf(stdout, "Device recursively visited: %zu items and took: %5.2fs\n", enum_count, (f32)(end - start)/1000.0f);
+    }
+
+    DqnFixedString2048 abs_file_path = {};
+    FileNode const *chosen_file      = PromptSelectFile(&root, &abs_file_path);
+    (void)chosen_file;
 
     return 0;
 }
