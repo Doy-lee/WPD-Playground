@@ -21,9 +21,9 @@ struct Context
 
 struct SelectedDevice
 {
-    int               num_devices;
-    DqnSlice<wchar_t> device_id;
-    DqnSlice<wchar_t> device_friendly_name;
+    int                num_devices;
+    DqnBuffer<wchar_t> device_id;
+    DqnBuffer<wchar_t> device_friendly_name;
 };
 
 struct State
@@ -47,19 +47,20 @@ char *WCharToUTF8(DqnMemStack *allocator, WCHAR const *wstr, int *result_len)
 
 struct FileNode
 {
-    DqnSlice<wchar_t>  name;
-    struct FileNode   *parent;
-    struct FileNode   *child;
-    struct FileNode   *next;
+    DqnBuffer<wchar_t>  name;
+    struct FileNode    *parent;
+    struct FileNode    *child;
+    int                 num_children;
+    struct FileNode    *next;
 };
 
-DqnSlice<wchar_t> CopyWStringToSlice(DqnMemStack *allocator, wchar_t const *str_to_copy, int len = -1)
+DqnBuffer<wchar_t> CopyWStringToSlice(DqnMemStack *allocator, wchar_t const *str_to_copy, int len = -1)
 {
     if (len == -1) len = DqnWStr_Len(str_to_copy);
 
-    DqnSlice<wchar_t> result = {};
-    result.len               = len;
-    result.str               = DQN_MEMSTACK_PUSH_ARRAY(allocator, wchar_t, len + 1);
+    DqnBuffer<wchar_t> result = {};
+    result.len                = len;
+    result.str                = DQN_MEMSTACK_PUSH_ARRAY(allocator, wchar_t, len + 1);
     DqnMem_Copy(result.str, str_to_copy, sizeof(*result.str) * len);
     result.data[len] = 0;
     return result;
@@ -317,12 +318,16 @@ void WPDEnumerateContentRecursively(Context *ctx, WPDReadSettings *read_settings
                     WPDEnumerateContentRecursively(ctx, read_settings, object_id_array[fetch_index], child, enum_count, depth + 1);
                     CoTaskMemFree(object_id_array[fetch_index]);
                 }
+
+                if (num_fetched > 0)
+                    child->parent->num_children += num_fetched;
+
             }
         }
     }
 }
 
-bool ReadYesOrNoStdin(char const *yes_no_msg)
+FILE_SCOPE bool PromptYesOrNoStdin(char const *yes_no_msg)
 {
     for (char input_buf[8];;)
     {
@@ -427,46 +432,42 @@ int main(int, char)
         curr_node = root.child;
     }
 
-    FileNode **node_array        = nullptr;
-    isize num_nodes              = 0;
-    bool recalc_file_sys_display = true;
-    bool exit_prompt             = false;
-    for (char input_buf[8]; !exit_prompt;)
+    bool exit_prompt         = false;
+    FileNode **index_to_node = nullptr;
+    for (char input_buf[8]; !exit_prompt; global_tmp_allocator.Pop(index_to_node), system("cls"))
     {
-        input_buf[0] = 0;
-        if (recalc_file_sys_display)
+        input_buf[0]          = 0;
+        isize const num_nodes = curr_node->parent->num_children;
+        index_to_node         = DQN_MEMSTACK_PUSH_ARRAY(&global_tmp_allocator, FileNode *, num_nodes);
+
+        // Print interactive display and generate index_to_node array
         {
-            if (node_array) global_tmp_allocator.Pop(node_array);
-            num_nodes = 0;
+            fprintf(stdout, "\n");
+            fprintf(stdout, "Path: %.*s\n", curr_path.len, curr_path.str);
 
-            for (FileNode *node = curr_node; node; node = node->next)
-                ++num_nodes;
+            FileNode *node = curr_node;
+            for (isize node_index = 0; node_index < num_nodes; node_index++, node = node->next)
+            {
+                index_to_node[node_index] = node;
+                fwprintf(stdout, L"  |--[%zu] %ws\n", node_index, node->name.str);
+            }
+            DQN_ASSERTM(node == nullptr, "Tree node did not calculate the number of children correctly, reported: %d", num_nodes);
 
-            node_array = DQN_MEMSTACK_PUSH_ARRAY(&global_tmp_allocator, FileNode *, num_nodes);
-            isize node_index = 0;
-            for (FileNode *node = curr_node; node; node = node->next)
-                node_array[node_index++] = node;
+            fprintf(stdout, "\na: Accept Current Directory | p: Previous Directory | [0-n]: Enter Directory\n");
+            fprintf(stdout, "\nSelect the next directory to enter: ");
         }
 
-        fprintf(stdout, "\n");
-        fprintf(stdout, "Path: %.*s\n", curr_path.len, curr_path.str);
-
-        for (isize node_index = 0; node_index < num_nodes; node_index++)
-        {
-            FileNode *node = node_array[node_index];
-            fwprintf(stdout, L"  |--[%zu] %ws\n", node_index, node->name.str);
-        }
-
-        fprintf(stdout, "\na: Accept Current Directory | p: Previous Directory | [0-n]: Enter Directory\n");
-        fprintf(stdout, "\nSelect the next directory to enter: ");
         gets_s(input_buf, DQN_ARRAY_COUNT(input_buf) - 1);
-
         char *input     = DqnChar_SkipWhitespace(input_buf);
         isize input_len = DqnStr_Len(input);
+
+        if (input_len <= 0)
+            continue;
 
         DqnFixedString2048 exit_msg = {};
         char const *exit_msg_fmt    = "Would you like to accept the selected path: %.*s";
 
+        // Parse User Input
         if (input_len == 1)
         {
             char input_lower = DqnChar_ToLower(input[0]);
@@ -486,41 +487,37 @@ int main(int, char)
                 curr_path.len = static_cast<int>(fwd_slash - curr_path.str);
                 curr_path.NullTerminate();
 
-                curr_node               = curr_node->parent;
-                recalc_file_sys_display = true;
+                curr_node = curr_node->parent;
                 continue;
             }
             else if (input_lower == 'a')
             {
                 exit_msg.SprintfAppend(exit_msg_fmt, curr_path.len, curr_path.str);
-                exit_prompt = ReadYesOrNoStdin(exit_msg.str);
+                exit_prompt = PromptYesOrNoStdin(exit_msg.str);
             }
         }
 
-        if (!DqnChar_IsDigit(input[0]))
-            continue;
-
-        int choice = (int)Dqn_StrToI64(input, DqnStr_Len(input));
-        if (choice >= 0 && choice < (int)num_nodes)
+        if (num_nodes > 0 && DqnChar_IsDigit(input[0]))
         {
-            curr_node = node_array[choice];
-            int node_name_len = 0;
-            char *node_name = WCharToUTF8(&global_tmp_allocator, curr_node->name.str, &node_name_len);
-            curr_path.SprintfAppend("/%.*s", node_name_len, node_name);
-            global_tmp_allocator.Pop(node_name);
-
-            if (curr_node->child != nullptr)
+            int choice = (int)Dqn_StrToI64(input, input_len);
+            if (choice >= 0 && choice < (int)num_nodes)
             {
-                curr_node               = curr_node->child;
-                recalc_file_sys_display = true;
-            }
-            else
-            {
-                exit_msg.SprintfAppend(exit_msg_fmt, curr_path.len, curr_path.str);
-                exit_prompt = ReadYesOrNoStdin(exit_msg.str);
-            }
+                curr_node         = index_to_node[choice];
+                int node_name_len = 0;
+                char *node_name   = WCharToUTF8(&global_tmp_allocator, curr_node->name.str, &node_name_len);
+                curr_path.SprintfAppend("/%.*s", node_name_len, node_name);
+                global_tmp_allocator.Pop(node_name);
 
-            continue;
+                if (curr_node->child)
+                {
+                    curr_node = curr_node->child;
+                }
+                else
+                {
+                    exit_msg.SprintfAppend(exit_msg_fmt, curr_path.len, curr_path.str);
+                    exit_prompt = PromptYesOrNoStdin(exit_msg.str);
+                }
+            }
         }
     }
 
