@@ -77,7 +77,7 @@ REM incremental:no, turn incremental builds off
 REM opt:ref,        try to remove functions from libs that are not referenced at all
 set LinkFlags=/LIBPATH:External/ffmpeg/lib /opt:ref /machine:x64 /nologo /DEBUG /NATVIS:External\Dqn.natvis
 set IncludeFiles=/I External/ffmpeg/include
-set LinkLibraries=user32.lib Ole32.lib PortableDeviceGuids.lib avcodec.lib avdevice.lib avfilter.lib avformat.lib avutil.lib
+set LinkLibraries=user32.lib Ole32.lib PortableDeviceGuids.lib libavcodec.a libavdevice.a libavfilter.a libavformat.a libavutil.a
 set DLLLinkLibraries=
 
 REM Clean time necessary for hours <10, which produces  H:MM:SS.SS where the

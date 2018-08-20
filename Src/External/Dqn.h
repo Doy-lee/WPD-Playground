@@ -903,7 +903,8 @@ i32 Dqn_GetNumSplits(char const *src, i32 src_len, char split_char);
 
 // Skips whitespace then reads UTF8 rune upto first \r or \n and null terminates at that point. Advances input to the start of the next line.
 // return: The immediate null terminated line
-DQN_FILE_SCOPE char *Dqn_EatLine(char **input, int *line_len);
+DQN_FILE_SCOPE char    *Dqn_EatLine(char **input, int *line_len);
+DQN_FILE_SCOPE wchar_t *Dqn_EatLine(wchar_t **input, int *line_len);
 
 DQN_FILE_SCOPE inline bool Dqn_BitIsSet (u32 bits, u32 flag);
 DQN_FILE_SCOPE inline u32  Dqn_BitSet   (u32 bits, u32 flag);
@@ -2140,6 +2141,11 @@ const u64 DQN_VHASH_TABLE_DEFAULT_SEED = 0x9747B28CAB3F8A7B;
 template <typename T> DQN_VHASH_TABLE_HASHING_PROC(DqnVHashTableDefaultHash, T)   { return DqnHash_Murmur64Seed(&key, sizeof(key), DQN_VHASH_TABLE_DEFAULT_SEED) % count; }
 template <typename T> DQN_VHASH_TABLE_EQUALS_PROC (DqnVHashTableDefaultEquals, T) { return (DqnMem_Cmp(&a, &b, sizeof(a)) == 0); }
 
+template <> DQN_VHASH_TABLE_HASHING_PROC(DqnVHashTableDefaultHash<DqnString>,   DqnString) { return DqnHash_Murmur64Seed(&key.str, key.len, DQN_VHASH_TABLE_DEFAULT_SEED) % count; }
+template <> DQN_VHASH_TABLE_EQUALS_PROC (DqnVHashTableDefaultEquals<DqnString>, DqnString) { return (a.len == b.len) && (DqnStr_Cmp(a.str, b.str, a.len) == 0); }
+template <> DQN_VHASH_TABLE_HASHING_PROC(DqnVHashTableDefaultHash<DqnBuffer<char>>,   DqnBuffer<char>) { return DqnHash_Murmur64Seed(&key.str, key.len, DQN_VHASH_TABLE_DEFAULT_SEED) % count; }
+template <> DQN_VHASH_TABLE_EQUALS_PROC (DqnVHashTableDefaultEquals<DqnBuffer<char>>, DqnBuffer<char>) { return DQN_BUFFER_STRCMP(a, b, Dqn::IgnoreCase::No); }
+
 // TODO(doyle): Fix this so we don't have to manually declare the fixed string sizes for hashing and equals
 #define DQN_VHASH_TABLE_DEFAULT_FIXED_STRING_PROCS(StringCapacity)                                 \
     template <>                                                                                    \
@@ -2461,7 +2467,7 @@ DQN_FILE_SCOPE bool   DqnFile_Size(wchar_t const *path, usize *size);
 
 DQN_FILE_SCOPE bool   DqnFile_MakeDir(char const *path);
 
-// info:   Pass in to fill with file attributes.
+// info:   (Optional) Pass in to fill with file attributes
 // return: False if file access failure
 DQN_FILE_SCOPE bool   DqnFile_GetInfo(char    const *path, DqnFileInfo *info);
 DQN_FILE_SCOPE bool   DqnFile_GetInfo(wchar_t const *path, DqnFileInfo *info);
@@ -2479,11 +2485,6 @@ DQN_FILE_SCOPE bool   DqnFile_Copy   (wchar_t const *src, wchar_t const *dest);
 //           allocated with malloc and must be freed using free() or the helper function ListDirFree()
 DQN_FILE_SCOPE char **DqnFile_ListDir       (char const *dir, i32 *num_files, DqnMemAPI *api = DQN_DEFAULT_HEAP_ALLOCATOR);
 DQN_FILE_SCOPE void   DqnFile_ListDirFree   (char **file_list, i32 num_files,  DqnMemAPI *api = DQN_DEFAULT_HEAP_ALLOCATOR);
-
-struct DqnSmartFile : public DqnFile
-{
-    ~DqnSmartFile() { this->Close(); }
-};
 
 // XPlatform > #DqnCatalog API
 // =================================================================================================
@@ -4658,9 +4659,9 @@ DQN_FILE_SCOPE char *Dqn_EatLine(char **input, int *line_len)
         {
             if (rune == '\r' || rune == '\n')
             {
-                (*input)[0] = 0;
-                *line_len   = static_cast<int>(*input - result);
-                *input += rune_len;
+                char *ptr_to_rune = (*input - rune_len);
+                *ptr_to_rune = 0;
+                *line_len = static_cast<int>(ptr_to_rune - result);
                 return result;
             }
         }
@@ -4668,6 +4669,30 @@ DQN_FILE_SCOPE char *Dqn_EatLine(char **input, int *line_len)
         {
             *line_len = static_cast<int>(*input - result);
             *input    = nullptr;
+            return result;
+        }
+    }
+}
+
+DQN_FILE_SCOPE wchar_t *Dqn_EatLine(wchar_t **input, int *line_len)
+{
+    *input          = DqnWChar_SkipWhitespace(*input);
+    wchar_t *result = *input;
+
+    for (;; (*input)++)
+    {
+        if (!(*input))
+        {
+            *line_len = static_cast<int>(*input - result);
+            return result;
+        }
+
+        wchar_t ch = (*input)[0];
+        if (ch == '\r' || ch == '\n')
+        {
+            (*input)[0] = 0;
+            *line_len   = static_cast<int>(*input - result);
+            (*input)++;
             return result;
         }
     }
@@ -7892,14 +7917,14 @@ FILE_SCOPE bool DqnFile__UnixGetFileSize(char const *path, usize *size)
 {
     struct stat file_stat = {};
     stat(path, &file_stat);
-    *size = file_stat.st_size;
+    if (size) *size = file_stat.st_size;
 
-    if (*size != 0)
+    if (file_stat.st_size != 0)
       return true;
 
     // NOTE: Can occur in some instances where files are generated on demand, i.e. /proc/cpuinfo.
     // But there can also be zero-byte files, we can't be sure. So manual check by counting bytes
-    if (FILE *file = fopen(path, "rb"))
+    if (size && FILE *file = fopen(path, "rb"))
     {
         DQN_DEFER(fclose(file));
         while (fgetc(file) != EOF)
@@ -8316,7 +8341,7 @@ bool DqnFile_Size(wchar_t const *path, usize *size)
     DqnFileInfo info = {};
     if (DqnFile_GetInfo(path, &info))
     {
-        *size = info.size;
+        if (size) *size = info.size;
         return true;
     }
 
@@ -8366,15 +8391,18 @@ bool DqnFile_GetInfo(wchar_t const *path, DqnFileInfo *info)
     WIN32_FILE_ATTRIBUTE_DATA attrib_data = {};
     if (GetFileAttributesExW(path, GetFileExInfoStandard, &attrib_data))
     {
-        info->create_time_in_s     = FileTimeToSeconds(&attrib_data.ftCreationTime);
-        info->last_access_time_in_s = FileTimeToSeconds(&attrib_data.ftLastAccessTime);
-        info->last_write_time_in_s  = FileTimeToSeconds(&attrib_data.ftLastWriteTime);
+        if (info)
+        {
+            info->create_time_in_s     = FileTimeToSeconds(&attrib_data.ftCreationTime);
+            info->last_access_time_in_s = FileTimeToSeconds(&attrib_data.ftLastAccessTime);
+            info->last_write_time_in_s  = FileTimeToSeconds(&attrib_data.ftLastWriteTime);
 
-        // TODO(doyle): What if usize is < Quad.part?
-        LARGE_INTEGER large_int = {};
-        large_int.HighPart      = attrib_data.nFileSizeHigh;
-        large_int.LowPart       = attrib_data.nFileSizeLow;
-        info->size            = (usize)large_int.QuadPart;
+            // TODO(doyle): What if usize is < Quad.part?
+            LARGE_INTEGER large_int = {};
+            large_int.HighPart      = attrib_data.nFileSizeHigh;
+            large_int.LowPart       = attrib_data.nFileSizeLow;
+            info->size            = (usize)large_int.QuadPart;
+        }
 
         return true;
     }
@@ -8403,10 +8431,13 @@ bool DqnFile_GetInfo(char const *path, DqnFileInfo *info)
         return false;
     }
 
-    info->size                  = file_stat.st_size;
-    info->create_time_in_s      = 0;
-    info->last_write_time_in_s  = file_stat.st_mtime;
-    info->last_access_time_in_s = file_stat.st_atime;
+    if (info)
+    {
+        info->size                  = file_stat.st_size;
+        info->create_time_in_s      = 0;
+        info->last_write_time_in_s  = file_stat.st_mtime;
+        info->last_access_time_in_s = file_stat.st_atime;
+    }
 
     return true;
 #endif

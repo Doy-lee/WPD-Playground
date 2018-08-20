@@ -61,13 +61,25 @@ struct FileNode
     struct FileNode    *next;
 };
 
-DqnBuffer<wchar_t> CopyWStringToSlice(DqnMemStack *allocator, wchar_t const *str_to_copy, int len = -1)
+DqnBuffer<wchar_t> CopyWStringToBuffer(DqnMemStack *allocator, wchar_t const *str_to_copy, int len = -1)
 {
     if (len == -1) len = DqnWStr_Len(str_to_copy);
 
     DqnBuffer<wchar_t> result = {};
     result.len                = len;
     result.str                = DQN_MEMSTACK_PUSH_ARRAY(allocator, wchar_t, len + 1);
+    DqnMem_Copy(result.str, str_to_copy, sizeof(*result.str) * len);
+    result.data[len] = 0;
+    return result;
+}
+
+DqnBuffer<char> CopyStringToBuffer(DqnMemStack *allocator, char const *str_to_copy, int len = -1)
+{
+    if (len == -1) len = DqnStr_Len(str_to_copy);
+
+    DqnBuffer<char> result = {};
+    result.len                = len;
+    result.str                = DQN_MEMSTACK_PUSH_ARRAY(allocator, char, len + 1);
     DqnMem_Copy(result.str, str_to_copy, sizeof(*result.str) * len);
     result.data[len] = 0;
     return result;
@@ -167,8 +179,8 @@ SelectedDevice PromptAndSelectPortableDeviceID(Context *ctx)
 
     WCHAR const *chosen_device               = device_names[chosen_device_index];
     WCHAR const *chosen_device_friendly_name = friendly_device_names[chosen_device_index];
-    result.device_id                         = CopyWStringToSlice(&ctx->allocator, chosen_device);
-    result.device_friendly_name              = CopyWStringToSlice(&ctx->allocator, chosen_device_friendly_name);
+    result.device_id                         = CopyWStringToBuffer(&ctx->allocator, chosen_device);
+    result.device_friendly_name              = CopyWStringToBuffer(&ctx->allocator, chosen_device_friendly_name);
 
     // Free the memory Windows allocated for us
     for (isize device_index = 0; device_index < num_devices; ++device_index)
@@ -274,7 +286,7 @@ void WPDMakeFileTreeRecursively(Context *ctx, WPDReadSettings *read_settings, WC
                 wprintf(L"%s\n", object_name);
 #endif
 
-                file_node->name = CopyWStringToSlice(&ctx->allocator, object_name);
+                file_node->name = CopyWStringToBuffer(&ctx->allocator, object_name);
             }
             else
             {
@@ -479,6 +491,11 @@ FileNode const *PromptSelectFile(FileNode const *root, DqnFixedString2048 *curr_
     return result;
 }
 
+struct SoundData
+{
+    int x;
+};
+
 FILE_SCOPE void ReadPlaylistFile(Context *ctx, wchar_t const *file)
 {
     auto mem_guard = global_tmp_allocator.TempRegionGuard();
@@ -496,17 +513,32 @@ FILE_SCOPE void ReadPlaylistFile(Context *ctx, wchar_t const *file)
     if (buf_size > 3 && (u8)buf_ptr[0] == 0xEF && (u8)buf_ptr[1] == 0xBB && (u8)buf_ptr[2] == 0xBF)
         buf_ptr += 3;
 
-    // TODO(doyle): What is this # character doing in the stream?
+    DqnVHashTable<DqnBuffer<char>, SoundData> playlist = {};
+    DqnVArray<char *> missing_files = {};
+    DQN_DEFER(missing_files.Free());
+
     int line_len = 0;
     while (char *line = Dqn_EatLine(&buf_ptr, &line_len))
     {
         if (line[0] == '#')
             continue;
 
-        fprintf(stdout, "parsed line: %s\n", line);
+        if (DqnFile_Size(line, nullptr))
+        {
+            DqnBuffer<char> key = CopyStringToBuffer(&ctx->allocator, line, line_len);
+            playlist.GetOrMake(key);
+        }
+        else
+        {
+            missing_files.Push(line);
+        }
     }
 
-    int break_here = 5;
+    for (DqnVHashTable<DqnBuffer<char>, SoundData>::Entry const &entry : playlist)
+        fprintf(stdout, "parsed line: %s\n", entry.key.str);
+
+    for (char const *missing_file : missing_files)
+        fprintf(stdout, "could not access file in fs: %s\n", missing_file);
 }
 
 int main(int, char)
@@ -563,6 +595,21 @@ int main(int, char)
     (void)chosen_file;
 
 #endif
+
+#if 0
+    AVFormatContext *fmt_ctx = NULL;
+    AVDictionaryEntry *tag = NULL;
+    int ret;
+
+    if ((ret = avformat_open_input(&fmt_ctx, "testfile", NULL, NULL)))
+        return ret;
+
+    while ((tag = av_dict_get(fmt_ctx->metadata, "", tag, AV_DICT_IGNORE_SUFFIX)))
+        printf("%s=%s\n", tag->key, tag->value);
+
+    avformat_close_input(&fmt_ctx);
+#endif
+
     ReadPlaylistFile(&ctx, L"Data/test.m3u8");
     return 0;
 }
