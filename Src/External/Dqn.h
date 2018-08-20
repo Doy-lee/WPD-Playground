@@ -803,12 +803,6 @@ DQN_FILE_SCOPE char *DqnChar_SkipWhitespace      (char const *ptr);
 // return:    The ptr to the last char, null if it could not find.
 DQN_FILE_SCOPE char *DqnChar_FindLastChar  (char *ptr, char ch, i32 len, u32 *len_to_char);
 
-// Finds up to the first [\r]\n and destroy the line, giving you a null terminated line at the newline.
-// returns: The value to advance the ptr by, this can be different from the line
-//          length if there are new lines or leading whitespaces in the next line
-DQN_FILE_SCOPE i32   DqnChar_FindNextLine(char *ptr, i32 *line_len);
-DQN_FILE_SCOPE char *DqnChar_GetNextLine (char *ptr, i32 *line_len);
-
 // #DqnStr API
 // =================================================================================================
 // num_bytes_to_cmp: If -1, cmp runs until \0 is encountered.
@@ -906,6 +900,10 @@ i32 Dqn_SplitString(char const *src, i32 src_len, char split_char, DqnSlice<char
 // Util function that uses Dqn_SplitString
 // return: The number of splits, splitting by "split_char" would generate.
 i32 Dqn_GetNumSplits(char const *src, i32 src_len, char split_char);
+
+// Skips whitespace then reads UTF8 rune upto first \r or \n and null terminates at that point. Advances input to the start of the next line.
+// return: The immediate null terminated line
+DQN_FILE_SCOPE char *Dqn_EatLine(char **input, int *line_len);
 
 DQN_FILE_SCOPE inline bool Dqn_BitIsSet (u32 bits, u32 flag);
 DQN_FILE_SCOPE inline u32  Dqn_BitSet   (u32 bits, u32 flag);
@@ -4645,48 +4643,34 @@ DQN_FILE_SCOPE char *DqnChar_FindLastChar(char *ptr, char ch, i32 len, u32 *len_
     return nullptr;
 }
 
-DQN_FILE_SCOPE i32 DqnChar_FindNextLine(char *ptr, i32 *line_len)
+DQN_FILE_SCOPE char *Dqn_EatLine(char **input, int *line_len)
 {
-    i32 len = 0;
-    ptr     = DqnChar_SkipWhitespace(ptr);
+    *input       = DqnChar_SkipWhitespace(*input);
+    char *result = *input;
 
-    // Advance pointer to first new line
-    while (ptr && *ptr != 0 && *ptr != '\r' && *ptr != '\n')
+    for (int rune_len = -1;; rune_len = -1)
     {
-        ptr++;
-        len++;
+        u32 rune = 0;
+        for (; rune_len != 0 && rune_len != 1; *input += rune_len)
+            rune_len = DqnStr_ReadUTF8Codepoint(reinterpret_cast<u32 *>(*input), &rune);
+
+        if (rune_len == 1)
+        {
+            if (rune == '\r' || rune == '\n')
+            {
+                (*input)[0] = 0;
+                *line_len   = static_cast<int>(*input - result);
+                *input += rune_len;
+                return result;
+            }
+        }
+        else if (rune_len == 0)
+        {
+            *line_len = static_cast<int>(*input - result);
+            *input    = nullptr;
+            return result;
+        }
     }
-
-    if (!ptr || *ptr == 0)
-    {
-        if (line_len) *line_len = len;
-        return -1;
-    }
-
-    // Destroy all new lines
-    i32 extra_chars = 0;
-    while (ptr && (*ptr == '\r' || *ptr == '\n' || *ptr == ' '))
-    {
-        *ptr = 0;
-        ptr++;
-        extra_chars++;
-    }
-
-    if (line_len) *line_len = len;
-    return len + extra_chars;
-}
-
-DQN_FILE_SCOPE char *DqnChar_GetNextLine (char *ptr, i32 *line_len)
-{
-    i32 offset_to_next_line = DqnChar_FindNextLine(ptr, line_len);
-
-    char *result = nullptr;
-    if (offset_to_next_line != -1)
-    {
-        result = ptr + offset_to_next_line;
-    }
-
-    return result;
 }
 
 // #DqnStr Implementation

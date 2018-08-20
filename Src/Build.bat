@@ -50,23 +50,22 @@ if not exist %BinDir% mkdir %BinDir%
 
 REM // Compile Switches
 REM // =============================================================================================
-REM EHa-   disable exception handling (we don't use)
-REM GR-    disable c runtime type information RTTI (we don't use)
-REM MD[d]  use dynamic runtime library. Add "d" for debug
-REM Gm     Minimal rebuild
-REM MT[d]  use static runtime library, so build and link it into exe. Add "d" for debug
-REM Od     disables optimisations
-REM Oi     enable intrinsics optimisation, let us use CPU intrinsics if there is one
-REM        instead of generating a call to external library (i.e. CRT).
-REM Z[i|7] enables debug data, Z7 combines the debug files into one.
-REM W4     warning level 4
-REM WX     treat warnings as errors
-REM wd4100 unused argument parameters
-REM wd4201 nonstandard extension used: nameless struct/union
-REM wd4189 local variable is initialised but not referenced
-REM wd4505 unreferenced local function not used will be removed
+REM EHa-     Disable exception handling (we don't use)
+REM GR-      Disable c runtime type information RTTI (we don't use)
+REM c        Only compile, don't link
+REM MD[d]    Use dynamic runtime library. Add "d" for debug
+REM MT[d]    Use static runtime library, so build and link it into exe. Add "d" for debug
+REM O[d|i|2] d: disable optimisation, 2: optimisation level 2
+REM          i: use CPU intrinsics if possible instead of external lib (i.e. CRT)
+REM Z[i|7]   i: enables debug data, 7: combines the debug files into one.
+REM Zs       Only check syntax
+REM W[4|X]   4: warning level, X: treat warnings as errors
+REM wd4100   Unused argument parameters
+REM wd4201   Nonstandard extension used: nameless struct/union
+REM wd4189   Local variable is initialised but not referenced
+REM wd4505   Unreferenced local function not used will be removed
 
-set CompileSwitches=-EHa -GR- -Oi -MTd -Z7 -W4 -wd4201 -wd4505 -Od
+set CompileSwitches=/EHa /GR- /Oi /MTd /Z7 /W4 /wd4201 /wd4505 /Od
 set Defines=
 
 set CompileFlags=%CompileSwitches% /Fo%BinDir%\%ProjectName% /Fd%BinDir%\%ProjectName% /Fe%BinDir%\%ProjectName%
@@ -74,13 +73,12 @@ set DLLFlags=%CompileSwitches% /Fo%BinDir%\%ProjectNameDLL% /Fe%BinDir%\%Project
 
 REM // Include Directories/Link Libraries
 REM // =============================================================================================
-set IncludeFiles=
-set LinkLibraries=user32.lib Ole32.lib PortableDeviceGuids.lib
-set DLLLinkLibraries=
-
 REM incremental:no, turn incremental builds off
 REM opt:ref,        try to remove functions from libs that are not referenced at all
-set LinkFlags=-opt:ref -machine:x64 -nologo /DEBUG /NATVIS:External\Dqn.natvis
+set LinkFlags=/LIBPATH:External/ffmpeg/lib /opt:ref /machine:x64 /nologo /DEBUG /NATVIS:External\Dqn.natvis
+set IncludeFiles=/I External/ffmpeg/include
+set LinkLibraries=user32.lib Ole32.lib PortableDeviceGuids.lib avcodec.lib avdevice.lib avfilter.lib avformat.lib avutil.lib
+set DLLLinkLibraries=
 
 REM Clean time necessary for hours <10, which produces  H:MM:SS.SS where the
 REM first character of time is an empty space. CleanTime will pad a 0 if
@@ -96,7 +94,8 @@ REM cl %DLLFlags% %Defines% UnityBuildDLL.cpp %IncludeFiles% /LD /link /PDB:%Bin
 
 set LastError=%ERRORLEVEL%
 if %LastError%==0 (
-	cl %CompileFlags% %Defines% UnityBuild.cpp %IncludeFiles% /link %LinkLibraries% %LinkFlags%
+	echo cl %CompileFlags% %Defines% UnityBuild.cpp %IncludeFiles% /link %LinkFlags% %LinkLibraries%
+	cl %CompileFlags% %Defines% UnityBuild.cpp %IncludeFiles% /link %LinkFlags% %LinkLibraries%
 	set LastError=%ERRORLEVEL%
 )
 

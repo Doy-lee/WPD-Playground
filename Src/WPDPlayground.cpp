@@ -8,6 +8,12 @@
 #include <wrl/client.h> // ComPtr
 #include <stdio.h>
 
+extern "C"
+{
+#include <libavformat/avformat.h>
+#include <libavutil/dict.h>
+}
+
 #define DQN_PLATFORM_HEADER
 #include "External/Dqn.h"
 
@@ -34,7 +40,8 @@ struct State
 
 FILE_SCOPE DqnMemStack global_tmp_allocator;
 
-char *WCharToUTF8(DqnMemStack *allocator, WCHAR const *wstr, int *result_len)
+
+char *WCharToUTF8(DqnMemStack *allocator, WCHAR const *wstr, int *result_len = nullptr)
 {
     int required_len   = DqnWin32_WCharToUTF8(wstr, nullptr, 0);
     char *result       = DQN_MEMSTACK_PUSH_ARRAY(allocator, char, required_len);
@@ -469,8 +476,37 @@ FileNode const *PromptSelectFile(FileNode const *root, DqnFixedString2048 *curr_
             }
         }
     }
-
     return result;
+}
+
+FILE_SCOPE void ReadPlaylistFile(Context *ctx, wchar_t const *file)
+{
+    auto mem_guard = global_tmp_allocator.TempRegionGuard();
+    usize buf_size = 0;
+    u8 *buf        = DqnFile_ReadAll(file, &buf_size, &global_tmp_allocator);
+    if (!buf)
+    {
+        DQN_LOGGER_W(&ctx->logger, "DqnFile_ReadAll: Failed, could not read file: %s\n", WCharToUTF8(&global_tmp_allocator, file));
+        return;
+    }
+
+    auto *buf_ptr = reinterpret_cast<char *>(buf);
+
+    // Skip UTF8-BOM
+    if (buf_size > 3 && (u8)buf_ptr[0] == 0xEF && (u8)buf_ptr[1] == 0xBB && (u8)buf_ptr[2] == 0xBF)
+        buf_ptr += 3;
+
+    // TODO(doyle): What is this # character doing in the stream?
+    int line_len = 0;
+    while (char *line = Dqn_EatLine(&buf_ptr, &line_len))
+    {
+        if (line[0] == '#')
+            continue;
+
+        fprintf(stdout, "parsed line: %s\n", line);
+    }
+
+    int break_here = 5;
 }
 
 int main(int, char)
@@ -480,6 +516,7 @@ int main(int, char)
     Context ctx   = {};
     ctx.allocator = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroClear::Yes, DqnMemStack::Flag::All);
 
+#if 0
     HRESULT hresult = 0;
     if (FAILED(hresult = CoInitializeEx(0, COINIT_SPEED_OVER_MEMORY)))
     {
@@ -514,6 +551,7 @@ int main(int, char)
 
         isize enum_count = 0;
         f64 start = DqnTimer_NowInMs();
+        // TODO(doyle): #performance make an iterative solution. but not important now
         WPDMakeFileTreeRecursively(&file_tree_ctx, &read_settings, WPD_DEVICE_OBJECT_ID, &root, &enum_count);
         f64 end = DqnTimer_NowInMs();
 
@@ -524,5 +562,7 @@ int main(int, char)
     FileNode const *chosen_file      = PromptSelectFile(&root, &abs_file_path);
     (void)chosen_file;
 
+#endif
+    ReadPlaylistFile(&ctx, L"Data/test.m3u8");
     return 0;
 }
