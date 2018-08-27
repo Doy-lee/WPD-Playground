@@ -493,18 +493,28 @@ FileNode const *PromptSelectFile(FileNode const *root, DqnFixedString2048 *curr_
 
 struct SoundData
 {
-    int x;
+    DqnBuffer<char> album;
+    DqnBuffer<char> album_artist;
+    DqnBuffer<char> artist;
+    DqnBuffer<char> date;
+    DqnBuffer<char> disc;
+    DqnBuffer<char> genre;
+    DqnBuffer<char> title;
+    DqnBuffer<char> track;
+    DqnBuffer<char> tracktotal;
 };
 
-FILE_SCOPE void ReadPlaylistFile(Context *ctx, wchar_t const *file)
+FILE_SCOPE DqnVHashTable<DqnBuffer<char>, SoundData> ReadPlaylistFile(Context *ctx, wchar_t const *file)
 {
+    DqnVHashTable<DqnBuffer<char>, SoundData> result = {};
+
     auto mem_guard = global_tmp_allocator.TempRegionGuard();
     usize buf_size = 0;
     u8 *buf        = DqnFile_ReadAll(file, &buf_size, &global_tmp_allocator);
     if (!buf)
     {
         DQN_LOGGER_W(&ctx->logger, "DqnFile_ReadAll: Failed, could not read file: %s\n", WCharToUTF8(&global_tmp_allocator, file));
-        return;
+        return result;
     }
 
     auto *buf_ptr = reinterpret_cast<char *>(buf);
@@ -513,8 +523,8 @@ FILE_SCOPE void ReadPlaylistFile(Context *ctx, wchar_t const *file)
     if (buf_size > 3 && (u8)buf_ptr[0] == 0xEF && (u8)buf_ptr[1] == 0xBB && (u8)buf_ptr[2] == 0xBF)
         buf_ptr += 3;
 
-    DqnVHashTable<DqnBuffer<char>, SoundData> playlist = {};
     DqnVArray<char *> missing_files = {};
+    missing_files.LazyInit(DQN_MEGABYTE(1)/sizeof(missing_files.data[0]));
     DQN_DEFER(missing_files.Free());
 
     int line_len = 0;
@@ -526,7 +536,7 @@ FILE_SCOPE void ReadPlaylistFile(Context *ctx, wchar_t const *file)
         if (DqnFile_Size(line, nullptr))
         {
             DqnBuffer<char> key = CopyStringToBuffer(&ctx->allocator, line, line_len);
-            playlist.GetOrMake(key);
+            result.GetOrMake(key);
         }
         else
         {
@@ -534,11 +544,51 @@ FILE_SCOPE void ReadPlaylistFile(Context *ctx, wchar_t const *file)
         }
     }
 
-    for (DqnVHashTable<DqnBuffer<char>, SoundData>::Entry const &entry : playlist)
+    for (DqnVHashTable<DqnBuffer<char>, SoundData>::Entry const &entry : result)
         fprintf(stdout, "parsed line: %s\n", entry.key.str);
 
     for (char const *missing_file : missing_files)
         fprintf(stdout, "could not access file in fs: %s\n", missing_file);
+
+
+    return result;
+}
+
+FILE_SCOPE bool ExtractSoundMetadata(Context *ctx, AVDictionary const *dictionary, SoundData *sound_data)
+{
+    bool atleast_one_entry_filled = false;
+    if (!dictionary) return atleast_one_entry_filled;
+
+    AVDictionaryEntry const *entry = av_dict_get(dictionary, "", nullptr, AV_DICT_IGNORE_SUFFIX);
+    if (!entry) return atleast_one_entry_filled;
+
+    while (entry)
+    {
+        DqnBuffer<char> *dest_buffer = nullptr;
+        const auto key               = DqnSlice<char>(entry->key, DqnStr_Len(entry->key));
+
+        if      (DQN_BUFFER_STRCMP(key, DQN_BUFFER_STR_LIT("album"),        Dqn::IgnoreCase::Yes)) dest_buffer = &sound_data->album;
+        else if (DQN_BUFFER_STRCMP(key, DQN_BUFFER_STR_LIT("album_artist"), Dqn::IgnoreCase::Yes)) dest_buffer = &sound_data->album_artist;
+        else if (DQN_BUFFER_STRCMP(key, DQN_BUFFER_STR_LIT("artist"),       Dqn::IgnoreCase::Yes)) dest_buffer = &sound_data->artist;
+        else if (DQN_BUFFER_STRCMP(key, DQN_BUFFER_STR_LIT("date"),         Dqn::IgnoreCase::Yes)) dest_buffer = &sound_data->date;
+        else if (DQN_BUFFER_STRCMP(key, DQN_BUFFER_STR_LIT("disc"),         Dqn::IgnoreCase::Yes)) dest_buffer = &sound_data->disc;
+        else if (DQN_BUFFER_STRCMP(key, DQN_BUFFER_STR_LIT("genre"),        Dqn::IgnoreCase::Yes)) dest_buffer = &sound_data->genre;
+        else if (DQN_BUFFER_STRCMP(key, DQN_BUFFER_STR_LIT("title"),        Dqn::IgnoreCase::Yes)) dest_buffer = &sound_data->title;
+        else if (DQN_BUFFER_STRCMP(key, DQN_BUFFER_STR_LIT("track"),        Dqn::IgnoreCase::Yes)) dest_buffer = &sound_data->track;
+        else if (DQN_BUFFER_STRCMP(key, DQN_BUFFER_STR_LIT("tracktotal"),   Dqn::IgnoreCase::Yes)) dest_buffer = &sound_data->tracktotal;
+
+        if (dest_buffer && dest_buffer->len == 0)
+        {
+            atleast_one_entry_filled = true;
+            const auto value = DqnSlice<char>(entry->value, DqnStr_Len(entry->value));
+            *dest_buffer     = CopyStringToBuffer(&ctx->allocator, value.str, value.len);
+        }
+
+        AVDictionaryEntry const *prev_entry = entry;
+        entry = av_dict_get(dictionary, "", prev_entry, AV_DICT_IGNORE_SUFFIX);
+    }
+
+    return atleast_one_entry_filled;
 }
 
 int main(int, char)
@@ -596,20 +646,48 @@ int main(int, char)
 
 #endif
 
-#if 0
-    AVFormatContext *fmt_ctx = NULL;
-    AVDictionaryEntry *tag = NULL;
-    int ret;
+    DqnVHashTable<DqnBuffer<char>, SoundData> playlist = ReadPlaylistFile(&ctx, L"Data/test.m3u8");
+    auto sounds = DqnVArray<SoundData>(playlist.num_used_buckets);
+    DQN_DEFER(playlist.Free());
 
-    if ((ret = avformat_open_input(&fmt_ctx, "testfile", NULL, NULL)))
-        return ret;
+    for (DqnVHashTable<DqnBuffer<char>, SoundData>::Entry const &sound_file : playlist)
+    {
+        AVFormatContext *fmt_ctx = nullptr;
+        if (avformat_open_input(&fmt_ctx, sound_file.key.str, nullptr, nullptr))
+        {
+            DQN_LOGGER_E(&ctx.logger, "avformat_open_input: failed to open file: %s", sound_file.key.str);
+            continue;
+        }
+        DQN_DEFER(avformat_close_input(&fmt_ctx));
 
-    while ((tag = av_dict_get(fmt_ctx->metadata, "", tag, AV_DICT_IGNORE_SUFFIX)))
-        printf("%s=%s\n", tag->key, tag->value);
+        // TODO(doyle): Verify what this does
+        if (avformat_find_stream_info(fmt_ctx, nullptr) < 0)
+        {
+            DQN_LOGGER_E(&ctx.logger, "avformat_find_stream_info: failed to find stream info");
+            continue;
+        }
 
-    avformat_close_input(&fmt_ctx);
+#if 1
+        SoundData sound_data          = {};
+        bool atleast_one_entry_filled = ExtractSoundMetadata(&ctx, fmt_ctx->metadata, &sound_data);
+        DQN_FOR_EACH(i, fmt_ctx->nb_streams)
+        {
+            AVStream const *stream = fmt_ctx->streams[i];
+            atleast_one_entry_filled |= ExtractSoundMetadata(&ctx, stream->metadata, &sound_data);
+        }
+
+        if (atleast_one_entry_filled)
+        {
+            sounds.Push(sound_data);
+        }
+        else
+        {
+            DQN_LOGGER_W(&ctx.logger, "No metadata could be parsed for file: %s", sound_file.key.str);
+        }
+#else
+        av_dump_format(fmt_ctx, 0, sound_file.key.str, 0);
 #endif
+    }
 
-    ReadPlaylistFile(&ctx, L"Data/test.m3u8");
     return 0;
 }

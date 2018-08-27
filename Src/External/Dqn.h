@@ -1513,7 +1513,8 @@ struct DqnMemStack
         char *head;       // Read
         char *tail;       // Read
 
-        Block(void *memory_, isize size_) : memory((char *)memory_), size(size_), prev_block(nullptr), head((char *)memory_), tail((char *)memory_ + size_) {}
+        Block() = default;
+        Block(void *memory_, isize size_) { *this = {}; memory = (char *)memory_; size = size_; head = memory; tail = memory + size; }
     };
 
     DqnMemTracker  tracker;         // Read: Metadata for managing ptr allocation
@@ -2194,19 +2195,19 @@ struct DqnVHashTable
     struct Bucket
     {
         Entry entries[4];
-        isize entryIndex;
+        isize entry_index;
     };
 
     Bucket    *buckets;
-    isize      numBuckets;
-    isize     *indexesOfUsedBuckets;
-    isize      indexInUsedBuckets;
+    isize      num_buckets;
+    isize     *indexes_of_used_buckets;
+    isize      num_used_buckets;
 
     DqnVHashTable       () = default;
-    DqnVHashTable       (isize size)                                                    { LazyInit(size); }
+    DqnVHashTable       (isize size)                       { LazyInit(size); }
 
     void       LazyInit (isize size = DQN_MAX(DQN_MEGABYTE(1)/sizeof(Bucket), 1024) );
-    void       Free     ()                                  { if (buckets) DqnOS_VFree(buckets, sizeof(buckets) * numBuckets); *this = {}; }
+    void       Free     ()                                 { if (buckets) DqnOS_VFree(buckets, sizeof(buckets) * num_buckets); *this = {}; }
 
     void       Erase    (Key const &key);                           // Delete the element matching key, does nothing if key not found.
     Entry     *GetEntry (Key const &key);                           // return: The (key, item) entry associated with the key, nullptr if key not in table yet.
@@ -2219,15 +2220,15 @@ struct DqnVHashTable
     struct Iterator
     {
         Entry  *entry;
-        Iterator(DqnVHashTable *table_, isize indexInUsedBuckets_ = 0, isize indexInBucket_ = 0);
-        Bucket *GetCurrBucket() const { return (table->buckets + table->indexesOfUsedBuckets[indexInUsedBuckets]); }
-        Entry  *GetCurrEntry()  const { return GetCurrBucket()->entries + indexInBucket; }
+        Iterator(DqnVHashTable *table_, isize num_used_buckets_ = 0, isize index_in_bucket_ = 0);
+        Bucket *GetCurrBucket() const { return (table->buckets + table->indexes_of_used_buckets[num_used_buckets]); }
+        Entry  *GetCurrEntry()  const { return GetCurrBucket()->entries + index_in_bucket; }
         Item   *GetCurrItem ()  const { return &(GetCurrEntry()->item); }
 
-        bool      operator!=(Iterator const &other) const { return !(indexInUsedBuckets == other.indexInUsedBuckets && indexInBucket == other.indexInBucket); }
+        bool      operator!=(Iterator const &other) const { return !(num_used_buckets == other.num_used_buckets && index_in_bucket == other.index_in_bucket); }
         Entry    &operator* ()                      const { return *GetCurrEntry(); }
         Iterator &operator++();
-        Iterator &operator--()                            { if (--indexInBucket < 0) { indexInBucket = 0; indexInUsedBuckets = DQN_MAX(--indexInUsedBuckets, 0); } entry = GetCurrEntry(); return *this; }
+        Iterator &operator--()                            { if (--index_in_bucket < 0) { index_in_bucket = 0; num_used_buckets = DQN_MAX(--num_used_buckets, 0); } entry = GetCurrEntry(); return *this; }
         Iterator  operator++(int)                         { Iterator result = *this; ++(*this); return result; }
         Iterator  operator--(int)                         { Iterator result = *this; --(*this); return result; }
         Iterator  operator+ (int offset)            const { Iterator result = *this; DQN_FOR_EACH(i, DQN_ABS(offset)) { (offset > 0) ? ++result : --result; } return result; } // TODO(doyle): Improve
@@ -2235,33 +2236,33 @@ struct DqnVHashTable
 
     private:
         DqnVHashTable *table;
-        isize          indexInUsedBuckets;
-        isize          indexInBucket;
+        isize          num_used_buckets;
+        isize          index_in_bucket;
     };
 
     Iterator   Begin() { return begin(); }
     Iterator   End()   { return end(); }
     Iterator   begin() { return Iterator(this); }
-    Iterator   end()   { return Iterator(this, numBuckets, DQN_ARRAY_COUNT(this->buckets[0].entries)); }
+    Iterator   end()   { return Iterator(this, num_buckets, DQN_ARRAY_COUNT(this->buckets[0].entries)); }
 };
 
 DQN_VHASH_TABLE_TEMPLATE DQN_VHASH_TABLE_DECL::Iterator::Iterator(DqnVHashTable *table_,
-                                                                  isize indexInUsedBuckets_,
-                                                                  isize indexInBucket_)
+                                                                  isize num_used_buckets_,
+                                                                  isize index_in_bucket_)
 : table(table_)
-, indexInUsedBuckets(indexInUsedBuckets_)
-, indexInBucket(indexInBucket_)
+, num_used_buckets(num_used_buckets_)
+, index_in_bucket(index_in_bucket_)
 , entry(nullptr)
 {
-    bool sentinelIndex = (indexInUsedBuckets == table->numBuckets &&
-                          indexInBucket == DQN_ARRAY_COUNT(table->buckets[0].entries));
-    bool emptyTable = (table->indexInUsedBuckets == 0);
-    if (emptyTable || sentinelIndex)
+    bool sentinel_index = (num_used_buckets == table->num_buckets &&
+                          index_in_bucket == DQN_ARRAY_COUNT(table->buckets[0].entries));
+    bool empty_table = (table->num_used_buckets == 0);
+    if (empty_table || sentinel_index)
     {
-        if (emptyTable)
+        if (empty_table)
         {
-            this->indexInUsedBuckets = table->numBuckets;
-            this->indexInBucket      = DQN_ARRAY_COUNT(table->buckets[0].entries);
+            this->num_used_buckets = table->num_buckets;
+            this->index_in_bucket      = DQN_ARRAY_COUNT(table->buckets[0].entries);
         }
     }
     else
@@ -2272,13 +2273,13 @@ DQN_VHASH_TABLE_TEMPLATE DQN_VHASH_TABLE_DECL::Iterator::Iterator(DqnVHashTable 
 
 DQN_VHASH_TABLE_TEMPLATE typename DQN_VHASH_TABLE_DECL::Iterator &DQN_VHASH_TABLE_DECL::Iterator::operator++()
 {
-    if (++indexInBucket >= GetCurrBucket()->entryIndex)
+    if (++index_in_bucket >= GetCurrBucket()->entry_index)
     {
-        indexInBucket = 0;
-        indexInUsedBuckets++;
+        index_in_bucket = 0;
+        num_used_buckets++;
     }
 
-    if (indexInUsedBuckets < table->indexInUsedBuckets)
+    if (num_used_buckets < table->num_used_buckets)
         entry = GetCurrEntry();
     else
         *this = table->end();
@@ -2289,10 +2290,10 @@ DQN_VHASH_TABLE_TEMPLATE typename DQN_VHASH_TABLE_DECL::Iterator &DQN_VHASH_TABL
 DQN_VHASH_TABLE_TEMPLATE void DQN_VHASH_TABLE_DECL::LazyInit(isize size)
 {
     *this                      = {};
-    this->numBuckets           = size;
+    this->num_buckets           = size;
     this->buckets              = static_cast<Bucket *>(DqnOS_VAlloc(size * sizeof(*this->buckets)));
-    this->indexesOfUsedBuckets = static_cast<isize *> (DqnOS_VAlloc(size * sizeof(*this->indexesOfUsedBuckets)));
-    DQN_ASSERT(this->buckets && this->indexesOfUsedBuckets);
+    this->indexes_of_used_buckets = static_cast<isize *> (DqnOS_VAlloc(size * sizeof(*this->indexes_of_used_buckets)));
+    DQN_ASSERT(this->buckets && this->indexes_of_used_buckets);
 }
 
 DQN_VHASH_TABLE_TEMPLATE typename DQN_VHASH_TABLE_DECL::Entry *
@@ -2300,11 +2301,11 @@ DQN_VHASH_TABLE_DECL::GetEntry(Key const &key)
 {
     if (!buckets) return nullptr;
 
-    isize index    = Hash(this->numBuckets, key);
+    isize index    = Hash(this->num_buckets, key);
     Bucket *bucket = this->buckets + index;
 
     Entry *result = nullptr;
-    for (isize i = 0; i < bucket->entryIndex && !result; i++)
+    for (isize i = 0; i < bucket->entry_index && !result; i++)
     {
         Entry *entry = bucket->entries + i;
         result       = Equals(entry->key, key) ? entry : nullptr;
@@ -2317,11 +2318,11 @@ DQN_VHASH_TABLE_TEMPLATE Item *DQN_VHASH_TABLE_DECL::GetOrMake(Key const &key, b
 {
     if (!this->buckets) LazyInit();
 
-    isize index    = Hash(this->numBuckets, key);
+    isize index    = Hash(this->num_buckets, key);
     Bucket *bucket = this->buckets + index;
 
     Entry *entry = nullptr;
-    for (isize i = 0; i < bucket->entryIndex && !entry; i++)
+    for (isize i = 0; i < bucket->entry_index && !entry; i++)
     {
         Entry *check = bucket->entries + i;
         entry        = Equals(check->key, key) ? check : nullptr;
@@ -2332,22 +2333,22 @@ DQN_VHASH_TABLE_TEMPLATE Item *DQN_VHASH_TABLE_DECL::GetOrMake(Key const &key, b
 
     if (!entry)
     {
-        DQN_ALWAYS_ASSERTM(bucket->entryIndex < DQN_ARRAY_COUNT(bucket->entries),
+        DQN_ALWAYS_ASSERTM(bucket->entry_index < DQN_ARRAY_COUNT(bucket->entries),
                            "More than %zu collisions in hash table, increase the size of the table or buckets",
                            DQN_ARRAY_COUNT(bucket->entries));
 
-        if (bucket->entryIndex == 0)
-            this->indexesOfUsedBuckets[this->indexInUsedBuckets++] = index;
+        if (bucket->entry_index == 0)
+            this->indexes_of_used_buckets[this->num_used_buckets++] = index;
 
-        entry      = bucket->entries + bucket->entryIndex++;
+        entry      = bucket->entries + bucket->entry_index++;
         entry->key = key;
 
         // TODO(doyle): A maybe case. We're using virtual memory, so you should
         // just initialise a larger size. It's essentially free ... maybe one
         // day we care about resizing the table but at the cost of a lot more code
         // complexity.
-        isize const threshold = static_cast<isize>(0.75f * this->numBuckets);
-        DQN_ALWAYS_ASSERTM(this->indexInUsedBuckets < threshold, "%zu >= %zu", this->indexInUsedBuckets, threshold);
+        isize const threshold = static_cast<isize>(0.75f * this->num_buckets);
+        DQN_ALWAYS_ASSERTM(this->num_used_buckets < threshold, "%zu >= %zu", this->num_used_buckets, threshold);
     }
 
     Item *result = &entry->item;
@@ -2359,31 +2360,31 @@ DQN_VHASH_TABLE_TEMPLATE void DQN_VHASH_TABLE_DECL::Erase(Key const &key)
     if (!buckets)
         return;
 
-    isize index    = Hash(this->numBuckets, key);
+    isize index    = Hash(this->num_buckets, key);
     Bucket *bucket = this->buckets + index;
 
-    DQN_FOR_EACH(i, bucket->entryIndex)
+    DQN_FOR_EACH(i, bucket->entry_index)
     {
         Entry *check  = bucket->entries + i;
         if (Equals(check->key, key))
         {
-            for (isize j = i; j < (bucket->entryIndex - 1); ++j)
+            for (isize j = i; j < (bucket->entry_index - 1); ++j)
                 bucket->entries[j] = bucket->entries[j + 1];
 
-            if (--bucket->entryIndex == 0)
+            if (--bucket->entry_index == 0)
             {
-                DQN_FOR_EACH(bucketIndex, this->indexInUsedBuckets)
+                DQN_FOR_EACH(bucketIndex, this->num_used_buckets)
                 {
-                    if (this->indexesOfUsedBuckets[bucketIndex] == index)
+                    if (this->indexes_of_used_buckets[bucketIndex] == index)
                     {
-                        indexesOfUsedBuckets[bucketIndex] =
-                            indexesOfUsedBuckets[--this->indexInUsedBuckets];
+                        indexes_of_used_buckets[bucketIndex] =
+                            indexes_of_used_buckets[--this->num_used_buckets];
                     }
                 }
             }
 
-            DQN_ASSERT(this->indexInUsedBuckets >= 0);
-            DQN_ASSERT(bucket->entryIndex >= 0);
+            DQN_ASSERT(this->num_used_buckets >= 0);
+            DQN_ASSERT(bucket->entry_index >= 0);
             return;
         }
     }
@@ -3364,7 +3365,7 @@ DqnMemStack__AllocateBlock(isize size, Dqn::ZeroClear clear, DqnMemAPI *api)
     DQN_ALWAYS_ASSERTM(result, "Allocated memory block was null");
 
     char *block_offset = reinterpret_cast<char *>(result) + sizeof(*result);
-    *result           = DqnMemStack::Block(block_offset, size);
+    *result            = DqnMemStack::Block(block_offset, size);
     return result;
 }
 
@@ -3462,6 +3463,7 @@ void *DqnMemStack::Push(isize size, AllocTo allocTo, u8 alignment)
         DQN_ASSERT(this->block->tail >= this->block->head);
     }
 
+    this->block->used_ = this->block->size - (this->block->tail - this->block->head);
     // Instrument allocation with guards and tracker
     // =============================================================================================
     {
