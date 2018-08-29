@@ -1889,9 +1889,8 @@ struct DqnString
     void Reserve         (int new_max);
 
     void Append          (char const *src, int len_ = -1);
-    int  VSprintfAtOffset(char const *fmt, va_list va, int offset)      { Reserve(len + VAListLen(fmt, va) + 1); int result = Dqn_vsnprintf(str + offset, max - len, fmt, va); len = (offset + result); return result; }
+    int  VSprintfAtOffset(char const *fmt, va_list va, int offset)      { Reserve(len + Dqn_vsnprintf(nullptr, 0, fmt, va) + 1); int result = Dqn_vsnprintf(str + offset, max - len, fmt, va); len = (offset + result); return result; }
 
-    static int VAListLen (char const *fmt, va_list va);
     static bool Cmp      (DqnString const *a, DqnString const *b,           Dqn::IgnoreCase ignore = Dqn::IgnoreCase::No) { return (a->len == b->len) && (DqnStr_Cmp(a->str, b->str, a->len, ignore) == 0); }
     static bool Cmp      (DqnString const *a, DqnSlice<char const> const b, Dqn::IgnoreCase ignore = Dqn::IgnoreCase::No) { return (a->len == b.len)  && (DqnStr_Cmp(a->str, b.data, b.len, ignore) == 0);  }
     static bool Cmp      (DqnString const *a, DqnSlice<char> const b,       Dqn::IgnoreCase ignore = Dqn::IgnoreCase::No) { return (a->len == b.len)  && (DqnStr_Cmp(a->str, b.data, b.len, ignore) == 0);  }
@@ -1942,7 +1941,15 @@ struct DqnFixedString
     void NullTerminate   () { str[len] = 0; } // NOTE: If you modify the storage directly, this can be handy.
     void Clear           (Dqn::ZeroClear clear = Dqn::ZeroClear::No) { if (clear == Dqn::ZeroClear::Yes) DqnMem_Set(str, 0, MAX); *this = {}; }
 
-    int  VSprintfAtOffset(char const *fmt, va_list va, int offset) { char *start = str + offset; int result = Dqn_vsnprintf(start, static_cast<int>((str + MAX) - start), fmt, va); len = (offset + result); return result; }
+    int VSprintfAtOffset(char const *fmt, va_list va, int offset)
+    {
+        char *start = str + offset;
+        int result  = Dqn_vsnprintf(start, static_cast<int>((str + MAX) - start), fmt, va);
+        len         = (offset + result);
+        if (Dqn::IS_DEBUG) DQN_ASSERT(Dqn_vsnprintf(nullptr, 0, fmt, va) < MAX);
+
+        return result;
+    }
 };
 
 using DqnFixedString16   = DqnFixedString<16>;
@@ -5683,14 +5690,6 @@ DQN_FILE_SCOPE inline u32 Dqn_BitToggle(u32 bits, u32 flag)
 
 // #DqnString Impleemntation
 // =================================================================================================
-int DqnString::VAListLen(char const *fmt, va_list va)
-{
-    LOCAL_PERSIST char tmp[STB_SPRINTF_MIN];
-    auto PrintCallback = [](char *buf, void * /*user*/, int /*len*/) -> char * { return buf; };
-    int result = Dqn_vsprintfcb(PrintCallback, nullptr, tmp, fmt, va);
-    return result;
-}
-
 void DqnString::Reserve(int new_max)
 {
     if (new_max >= this->max)

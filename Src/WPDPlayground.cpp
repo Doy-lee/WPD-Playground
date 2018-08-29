@@ -23,6 +23,9 @@ struct Context
 {
     DqnLogger   logger;
     DqnMemStack allocator;
+
+    DqnBuffer<char> exe_name;
+    DqnBuffer<char> exe_directory;
 };
 
 struct SelectedDevice
@@ -39,27 +42,6 @@ struct State
 };
 
 FILE_SCOPE DqnMemStack global_tmp_allocator;
-
-
-char *WCharToUTF8(DqnMemStack *allocator, WCHAR const *wstr, int *result_len = nullptr)
-{
-    int required_len   = DqnWin32_WCharToUTF8(wstr, nullptr, 0);
-    char *result       = DQN_MEMSTACK_PUSH_ARRAY(allocator, char, required_len);
-    int convert_result = DqnWin32_WCharToUTF8(wstr, result, required_len);
-    DQN_ASSERTM(convert_result != -1, "UTF8 conversion error should never happen.");
-
-    if (result_len) *result_len = required_len;
-    return result;
-}
-
-struct FileNode
-{
-    DqnBuffer<wchar_t>  name;
-    struct FileNode    *parent;
-    struct FileNode    *child;
-    int                 num_children;
-    struct FileNode    *next;
-};
 
 DqnBuffer<wchar_t> CopyWStringToBuffer(DqnMemStack *allocator, wchar_t const *str_to_copy, int len = -1)
 {
@@ -85,6 +67,54 @@ DqnBuffer<char> CopyStringToBuffer(DqnMemStack *allocator, char const *str_to_co
     return result;
 }
 
+void DqnWin32_GetExeNameAndDirectory(DqnMemStack *allocator, DqnBuffer<char> *exe_name, DqnBuffer<char> *exe_directory)
+{
+    if (!exe_name && !exe_directory) return;
+
+    i32 offset_to_last_backslash = -1;
+    int exe_buf_len              = 512;
+    char *exe_buf                = nullptr;
+    while(offset_to_last_backslash == -1)
+    {
+        if (exe_buf)
+        {
+            global_tmp_allocator.Pop(exe_buf);
+            exe_buf_len += 128;
+        }
+
+        exe_buf = (char *)global_tmp_allocator.Push(exe_buf_len * sizeof(char), DqnMemStack::AllocTo::Tail);
+        offset_to_last_backslash = DqnWin32_GetEXEDirectory(exe_buf, exe_buf_len);
+    }
+
+    if (exe_name)
+        *exe_name = CopyStringToBuffer(allocator, exe_buf, offset_to_last_backslash + 1);
+
+    if (exe_directory)
+        *exe_directory = CopyStringToBuffer(allocator, exe_buf, offset_to_last_backslash);
+
+    global_tmp_allocator.Pop(exe_buf);
+}
+
+char *WCharToUTF8(DqnMemStack *allocator, WCHAR const *wstr, int *result_len = nullptr)
+{
+    int required_len   = DqnWin32_WCharToUTF8(wstr, nullptr, 0);
+    char *result       = DQN_MEMSTACK_PUSH_ARRAY(allocator, char, required_len);
+    int convert_result = DqnWin32_WCharToUTF8(wstr, result, required_len);
+    DQN_ASSERTM(convert_result != -1, "UTF8 conversion error should never happen.");
+
+    if (result_len) *result_len = required_len;
+    return result;
+}
+
+struct FileNode
+{
+    DqnBuffer<wchar_t>  name;
+    struct FileNode    *parent;
+    struct FileNode    *child;
+    int                 num_children;
+    struct FileNode    *next;
+};
+
 #define HANDLE_COM_ERROR(hresult, failing_function_name, logger) HandleComError(hresult, failing_function_name, logger, DQN_LOGGER_CONTEXT)
 FILE_SCOPE void HandleComError(HRESULT hresult, char const *failing_function_name, DqnLogger *logger, DqnLogger::Context log_context)
 {
@@ -98,7 +128,7 @@ FILE_SCOPE void HandleComError(HRESULT hresult, char const *failing_function_nam
 }
 
 // return: num_devices is set to 0 if no devices are available, otherwise the device_id and friendly name is set.
-SelectedDevice PromptAndSelectPortableDeviceID(Context *ctx)
+SelectedDevice PromptAndSelectPortableDeviceID(Context *context)
 {
     auto memGuard = global_tmp_allocator.TempRegionGuard();
 
@@ -108,14 +138,14 @@ SelectedDevice PromptAndSelectPortableDeviceID(Context *ctx)
 
     if (FAILED(hresult = CoCreateInstance(__uuidof(PortableDeviceManager), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&device_manager))))
     {
-        HANDLE_COM_ERROR(hresult, "CoCreateInstance", &ctx->logger);
+        HANDLE_COM_ERROR(hresult, "CoCreateInstance", &context->logger);
         return result;
     }
 
     DWORD num_devices = 0;
     if (FAILED(hresult = device_manager->GetDevices(nullptr, &num_devices)))
     {
-        HANDLE_COM_ERROR(hresult, "IPortableDeviceManager::GetDevices", &ctx->logger);
+        HANDLE_COM_ERROR(hresult, "IPortableDeviceManager::GetDevices", &context->logger);
         return result;
     }
 
@@ -128,7 +158,7 @@ SelectedDevice PromptAndSelectPortableDeviceID(Context *ctx)
     WCHAR **friendly_device_names = DQN_MEMSTACK_PUSH_ARRAY(&global_tmp_allocator, WCHAR *, num_devices);
     if (FAILED(hresult = device_manager->GetDevices(device_names, &num_devices)))
     {
-        HANDLE_COM_ERROR(hresult, "IPortableDeviceManager::GetDevices", &ctx->logger);
+        HANDLE_COM_ERROR(hresult, "IPortableDeviceManager::GetDevices", &context->logger);
         return result;
     }
 
@@ -138,14 +168,14 @@ SelectedDevice PromptAndSelectPortableDeviceID(Context *ctx)
         DWORD friendly_name_len = 0;
         if (FAILED(device_manager->GetDeviceFriendlyName(name, nullptr, &friendly_name_len)))
         {
-            HANDLE_COM_ERROR(hresult, "IPortableDeviceManager::GetDeviceFriendlyName", &ctx->logger);
+            HANDLE_COM_ERROR(hresult, "IPortableDeviceManager::GetDeviceFriendlyName", &context->logger);
             return result;
         }
 
         WCHAR *friendly_name = DQN_MEMSTACK_PUSH_ARRAY(&global_tmp_allocator, WCHAR, friendly_name_len);
         if (FAILED(device_manager->GetDeviceFriendlyName(name, friendly_name, &friendly_name_len)))
         {
-            HANDLE_COM_ERROR(hresult, "IPortableDeviceManager::GetDeviceFriendlyName", &ctx->logger);
+            HANDLE_COM_ERROR(hresult, "IPortableDeviceManager::GetDeviceFriendlyName", &context->logger);
             return result;
         }
 
@@ -179,8 +209,8 @@ SelectedDevice PromptAndSelectPortableDeviceID(Context *ctx)
 
     WCHAR const *chosen_device               = device_names[chosen_device_index];
     WCHAR const *chosen_device_friendly_name = friendly_device_names[chosen_device_index];
-    result.device_id                         = CopyWStringToBuffer(&ctx->allocator, chosen_device);
-    result.device_friendly_name              = CopyWStringToBuffer(&ctx->allocator, chosen_device_friendly_name);
+    result.device_id                         = CopyWStringToBuffer(&context->allocator, chosen_device);
+    result.device_friendly_name              = CopyWStringToBuffer(&context->allocator, chosen_device_friendly_name);
 
     // Free the memory Windows allocated for us
     for (isize device_index = 0; device_index < num_devices; ++device_index)
@@ -189,34 +219,34 @@ SelectedDevice PromptAndSelectPortableDeviceID(Context *ctx)
     return result;
 }
 
-ComPtr<IPortableDevice> OpenPortableDevice(Context *ctx, wchar_t const *device_id)
+ComPtr<IPortableDevice> OpenPortableDevice(Context *context, wchar_t const *device_id)
 {
     ComPtr<IPortableDeviceValues> device_values = nullptr;
     HRESULT hresult                             = 0;
 
     if (FAILED(hresult = CoCreateInstance(CLSID_PortableDeviceValues, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&device_values))))
     {
-        HANDLE_COM_ERROR(hresult, "CoCreateInstance", &ctx->logger);
+        HANDLE_COM_ERROR(hresult, "CoCreateInstance", &context->logger);
         return nullptr;
     }
 
     ComPtr<IPortableDevice> portable_device = nullptr;
     if (FAILED(hresult = CoCreateInstance(CLSID_PortableDeviceFTM, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&portable_device))))
     {
-        HANDLE_COM_ERROR(hresult, "CoCreateInstance", &ctx->logger);
+        HANDLE_COM_ERROR(hresult, "CoCreateInstance", &context->logger);
         return nullptr;
     }
 
     if (FAILED(hresult = portable_device->Open(device_id, device_values.Get())))
     {
-        HANDLE_COM_ERROR(hresult, "IPortableDevice::Open", &ctx->logger);
+        HANDLE_COM_ERROR(hresult, "IPortableDevice::Open", &context->logger);
         return nullptr;
     }
 
     ComPtr<IPortableDevice> result = nullptr;
     if (FAILED(hresult = portable_device->QueryInterface(IID_IPortableDevice, (void **)&result)))
     {
-        HANDLE_COM_ERROR(hresult, "IPortableDevice::QueryInterface", &ctx->logger);
+        HANDLE_COM_ERROR(hresult, "IPortableDevice::QueryInterface", &context->logger);
         return nullptr;
     }
 
@@ -230,37 +260,37 @@ struct WPDReadSettings
     ComPtr<IPortableDeviceContent>       content;
 };
 
-FILE_SCOPE bool WPDMakeReadSettings(Context *ctx, IPortableDevice *portable_device, WPDReadSettings *settings)
+FILE_SCOPE bool WPDMakeReadSettings(Context *context, IPortableDevice *portable_device, WPDReadSettings *settings)
 {
     HRESULT hresult;
     if (FAILED(hresult = portable_device->Content(&settings->content)))
     {
-        HANDLE_COM_ERROR(hresult, "IPortableDevice::Content", &ctx->logger);
+        HANDLE_COM_ERROR(hresult, "IPortableDevice::Content", &context->logger);
         return false;
     }
 
     if (FAILED(CoCreateInstance(CLSID_PortableDeviceKeyCollection, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&settings->properties_to_read))))
     {
-        HANDLE_COM_ERROR(hresult, "CoCreateInstance", &ctx->logger);
+        HANDLE_COM_ERROR(hresult, "CoCreateInstance", &context->logger);
         return false;
     }
 
     if (FAILED(settings->properties_to_read->Add(WPD_OBJECT_NAME)))
     {
-        HANDLE_COM_ERROR(hresult, "IPortableDeviceKeyCollection::Add", &ctx->logger);
+        HANDLE_COM_ERROR(hresult, "IPortableDeviceKeyCollection::Add", &context->logger);
         return false;
     }
 
     if (FAILED(settings->content->Properties(&settings->device_properties)))
     {
-        HANDLE_COM_ERROR(hresult, "IPortableDeviceContext::Properties", &ctx->logger);
+        HANDLE_COM_ERROR(hresult, "IPortableDeviceContext::Properties", &context->logger);
         return false;
     }
 
     return true;
 }
 
-void WPDMakeFileTreeRecursively(Context *ctx, WPDReadSettings *read_settings, WCHAR const *parent_object_id, FileNode *file_node, isize *enum_count, int depth = 0)
+void WPDMakeFileTreeRecursively(Context *context, WPDReadSettings *read_settings, WCHAR const *parent_object_id, FileNode *file_node, isize *enum_count, int depth = 0)
 {
     (*enum_count)++;
     // Get the file name of the object
@@ -286,16 +316,16 @@ void WPDMakeFileTreeRecursively(Context *ctx, WPDReadSettings *read_settings, WC
                 wprintf(L"%s\n", object_name);
 #endif
 
-                file_node->name = CopyWStringToBuffer(&ctx->allocator, object_name);
+                file_node->name = CopyWStringToBuffer(&context->allocator, object_name);
             }
             else
             {
-                HANDLE_COM_ERROR(hresult, "IPortableDeviceValues::GetStringValue", &ctx->logger);
+                HANDLE_COM_ERROR(hresult, "IPortableDeviceValues::GetStringValue", &context->logger);
             }
         }
         else
         {
-            HANDLE_COM_ERROR(hresult, "IPortableDeviceKeyCollection::GetValues", &ctx->logger);
+            HANDLE_COM_ERROR(hresult, "IPortableDeviceKeyCollection::GetValues", &context->logger);
         }
     }
 
@@ -306,7 +336,7 @@ void WPDMakeFileTreeRecursively(Context *ctx, WPDReadSettings *read_settings, WC
         ComPtr<IEnumPortableDeviceObjectIDs> object_ids = nullptr;
         if (FAILED(hresult = content->EnumObjects(0 /*dwFlags ignored*/, parent_object_id, nullptr /*pFilter ignored*/, &object_ids)))
         {
-            HANDLE_COM_ERROR(hresult, "IPortableDeviceContent::EnumObjects", &ctx->logger);
+            HANDLE_COM_ERROR(hresult, "IPortableDeviceContent::EnumObjects", &context->logger);
             return;
         }
 
@@ -323,18 +353,18 @@ void WPDMakeFileTreeRecursively(Context *ctx, WPDReadSettings *read_settings, WC
                 {
                     if (!child)
                     {
-                        file_node->child = DQN_MEMSTACK_PUSH_STRUCT(&ctx->allocator, FileNode);
+                        file_node->child = DQN_MEMSTACK_PUSH_STRUCT(&context->allocator, FileNode);
                         child            = file_node->child;
                         child->parent    = file_node;
                     }
                     else
                     {
-                        child->next   = DQN_MEMSTACK_PUSH_STRUCT(&ctx->allocator, FileNode);
+                        child->next   = DQN_MEMSTACK_PUSH_STRUCT(&context->allocator, FileNode);
                         child         = child->next;
                         child->parent = file_node;
                     }
 
-                    WPDMakeFileTreeRecursively(ctx, read_settings, object_id_array[fetch_index], child, enum_count, depth + 1);
+                    WPDMakeFileTreeRecursively(context, read_settings, object_id_array[fetch_index], child, enum_count, depth + 1);
                     CoTaskMemFree(object_id_array[fetch_index]);
                 }
 
@@ -493,6 +523,7 @@ FileNode const *PromptSelectFile(FileNode const *root, DqnFixedString2048 *curr_
 
 struct SoundData
 {
+    DqnBuffer<char> file_path;
     DqnBuffer<char> album;
     DqnBuffer<char> album_artist;
     DqnBuffer<char> artist;
@@ -504,7 +535,12 @@ struct SoundData
     DqnBuffer<char> tracktotal;
 };
 
-FILE_SCOPE DqnVHashTable<DqnBuffer<char>, SoundData> ReadPlaylistFile(Context *ctx, wchar_t const *file)
+struct SoundDataToDisk
+{
+    DqnBuffer<char> dest_file_path;
+};
+
+FILE_SCOPE DqnVHashTable<DqnBuffer<char>, SoundData> ReadPlaylistFile(Context *context, wchar_t const *file)
 {
     DqnVHashTable<DqnBuffer<char>, SoundData> result = {};
 
@@ -513,13 +549,13 @@ FILE_SCOPE DqnVHashTable<DqnBuffer<char>, SoundData> ReadPlaylistFile(Context *c
     u8 *buf        = DqnFile_ReadAll(file, &buf_size, &global_tmp_allocator);
     if (!buf)
     {
-        DQN_LOGGER_W(&ctx->logger, "DqnFile_ReadAll: Failed, could not read file: %s\n", WCharToUTF8(&global_tmp_allocator, file));
+        DQN_LOGGER_W(&context->logger, "DqnFile_ReadAll: Failed, could not read file: %s\n", WCharToUTF8(&global_tmp_allocator, file));
         return result;
     }
 
     auto *buf_ptr = reinterpret_cast<char *>(buf);
 
-    // Skip UTF8-BOM
+    // Skip UTF8-BOM bytes if present
     if (buf_size > 3 && (u8)buf_ptr[0] == 0xEF && (u8)buf_ptr[1] == 0xBB && (u8)buf_ptr[2] == 0xBF)
         buf_ptr += 3;
 
@@ -535,8 +571,8 @@ FILE_SCOPE DqnVHashTable<DqnBuffer<char>, SoundData> ReadPlaylistFile(Context *c
 
         if (DqnFile_Size(line, nullptr))
         {
-            DqnBuffer<char> key = CopyStringToBuffer(&ctx->allocator, line, line_len);
-            result.GetOrMake(key);
+            DqnBuffer<char> file_path = CopyStringToBuffer(&context->allocator, line, line_len);
+            result.GetOrMake(file_path);
         }
         else
         {
@@ -554,7 +590,7 @@ FILE_SCOPE DqnVHashTable<DqnBuffer<char>, SoundData> ReadPlaylistFile(Context *c
     return result;
 }
 
-FILE_SCOPE bool ExtractSoundMetadata(Context *ctx, AVDictionary const *dictionary, SoundData *sound_data)
+FILE_SCOPE bool ExtractSoundMetadata(Context *context, AVDictionary const *dictionary, SoundData *sound_data)
 {
     bool atleast_one_entry_filled = false;
     if (!dictionary) return atleast_one_entry_filled;
@@ -581,7 +617,7 @@ FILE_SCOPE bool ExtractSoundMetadata(Context *ctx, AVDictionary const *dictionar
         {
             atleast_one_entry_filled = true;
             const auto value = DqnSlice<char>(entry->value, DqnStr_Len(entry->value));
-            *dest_buffer     = CopyStringToBuffer(&ctx->allocator, value.str, value.len);
+            *dest_buffer     = CopyStringToBuffer(&context->allocator, value.str, value.len);
         }
 
         AVDictionaryEntry const *prev_entry = entry;
@@ -591,23 +627,38 @@ FILE_SCOPE bool ExtractSoundMetadata(Context *ctx, AVDictionary const *dictionar
     return atleast_one_entry_filled;
 }
 
+DqnBuffer<char> AllocateSprintf(DqnMemStack *allocator, char const *fmt, ...)
+{
+
+    DqnBuffer<char> result = {};
+
+    va_list va;
+    va_start(va, fmt);
+    result.len = Dqn_vsnprintf(nullptr, 0, fmt, va) + 1;
+    result.str = DQN_MEMSTACK_PUSH_ARRAY(allocator, char, result.len);
+    Dqn_vsnprintf(result.str, result.len, fmt, va);
+    va_end(va);
+
+    return result;
+}
+
 int main(int, char)
 {
     global_tmp_allocator = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroClear::Yes, DqnMemStack::Flag::All);
 
-    Context ctx   = {};
-    ctx.allocator = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroClear::Yes, DqnMemStack::Flag::All);
+    Context context   = {};
+    context.allocator = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroClear::Yes, DqnMemStack::Flag::All);
 
 #if 0
     HRESULT hresult = 0;
     if (FAILED(hresult = CoInitializeEx(0, COINIT_SPEED_OVER_MEMORY)))
     {
-        HANDLE_COM_ERROR(hresult, "CoInitializeEx", &ctx.logger);
+        HANDLE_COM_ERROR(hresult, "CoInitializeEx", &context.logger);
         return -1;
     }
 
     State state         = {};
-    state.chosen_device = PromptAndSelectPortableDeviceID(&ctx);
+    state.chosen_device = PromptAndSelectPortableDeviceID(&context);
     if (state.chosen_device.num_devices == 0)
     {
         fprintf(stdout, "There are no MTP devices to choose from.");
@@ -617,24 +668,24 @@ int main(int, char)
     isize file_tree_allocator_mem_size = DQN_MEGABYTE(16);
     void *file_tree_allocator_mem      = DqnOS_VAlloc(file_tree_allocator_mem_size);
 
-    Context file_tree_ctx   = {};
-    file_tree_ctx.allocator = DqnMemStack(file_tree_allocator_mem, file_tree_allocator_mem_size, Dqn::ZeroClear::No, DqnMemStack::Flag::All);
-    file_tree_ctx.logger    = ctx.logger;
+    Context file_tree_context   = {};
+    file_tree_context.allocator = DqnMemStack(file_tree_allocator_mem, file_tree_allocator_mem_size, Dqn::ZeroClear::No, DqnMemStack::Flag::All);
+    file_tree_context.logger    = context.logger;
     FileNode root           = {};
     {
-        state.opened_device              = OpenPortableDevice(&ctx, state.chosen_device.device_id.str);
+        state.opened_device              = OpenPortableDevice(&context, state.chosen_device.device_id.str);
         IPortableDevice *portable_device = state.opened_device.Get();
         WPDReadSettings read_settings    = {};
-        if (!WPDMakeReadSettings(&ctx, portable_device, &read_settings))
+        if (!WPDMakeReadSettings(&context, portable_device, &read_settings))
         {
-            DQN_LOGGER_E(&ctx.logger, "Could not make WPDReadSettings");
+            DQN_LOGGER_E(&context.logger, "Could not make WPDReadSettings");
             return -1;
         }
 
         isize enum_count = 0;
         f64 start = DqnTimer_NowInMs();
         // TODO(doyle): #performance make an iterative solution. but not important now
-        WPDMakeFileTreeRecursively(&file_tree_ctx, &read_settings, WPD_DEVICE_OBJECT_ID, &root, &enum_count);
+        WPDMakeFileTreeRecursively(&file_tree_context, &read_settings, WPD_DEVICE_OBJECT_ID, &root, &enum_count);
         f64 end = DqnTimer_NowInMs();
 
         fprintf(stdout, "Device recursively visited: %zu items and took: %5.2fs\n", enum_count, (f32)(end - start)/1000.0f);
@@ -646,47 +697,61 @@ int main(int, char)
 
 #endif
 
-    DqnVHashTable<DqnBuffer<char>, SoundData> playlist = ReadPlaylistFile(&ctx, L"Data/test.m3u8");
+    DqnVHashTable<DqnBuffer<char>, SoundData> playlist = ReadPlaylistFile(&context, L"Data/test.m3u8");
     auto sounds = DqnVArray<SoundData>(playlist.num_used_buckets);
     DQN_DEFER(playlist.Free());
 
     for (DqnVHashTable<DqnBuffer<char>, SoundData>::Entry const &sound_file : playlist)
     {
-        AVFormatContext *fmt_ctx = nullptr;
-        if (avformat_open_input(&fmt_ctx, sound_file.key.str, nullptr, nullptr))
+        AVFormatContext *fmt_context = nullptr;
+        if (avformat_open_input(&fmt_context, sound_file.key.str, nullptr, nullptr))
         {
-            DQN_LOGGER_E(&ctx.logger, "avformat_open_input: failed to open file: %s", sound_file.key.str);
+            DQN_LOGGER_E(&context.logger, "avformat_open_input: failed to open file: %s", sound_file.key.str);
             continue;
         }
-        DQN_DEFER(avformat_close_input(&fmt_ctx));
+        DQN_DEFER(avformat_close_input(&fmt_context));
 
         // TODO(doyle): Verify what this does
-        if (avformat_find_stream_info(fmt_ctx, nullptr) < 0)
+        if (avformat_find_stream_info(fmt_context, nullptr) < 0)
         {
-            DQN_LOGGER_E(&ctx.logger, "avformat_find_stream_info: failed to find stream info");
+            DQN_LOGGER_E(&context.logger, "avformat_find_stream_info: failed to find stream info");
             continue;
         }
 
 #if 1
         SoundData sound_data          = {};
-        bool atleast_one_entry_filled = ExtractSoundMetadata(&ctx, fmt_ctx->metadata, &sound_data);
-        DQN_FOR_EACH(i, fmt_ctx->nb_streams)
+        bool atleast_one_entry_filled = ExtractSoundMetadata(&context, fmt_context->metadata, &sound_data);
+        DQN_FOR_EACH(i, fmt_context->nb_streams)
         {
-            AVStream const *stream = fmt_ctx->streams[i];
-            atleast_one_entry_filled |= ExtractSoundMetadata(&ctx, stream->metadata, &sound_data);
+            AVStream const *stream = fmt_context->streams[i];
+            atleast_one_entry_filled |= ExtractSoundMetadata(&context, stream->metadata, &sound_data);
         }
 
         if (atleast_one_entry_filled)
         {
+            sound_data.file_path = CopyStringToBuffer(&context.allocator, sound_file.key.str, sound_file.key.len);
             sounds.Push(sound_data);
         }
         else
         {
-            DQN_LOGGER_W(&ctx.logger, "No metadata could be parsed for file: %s", sound_file.key.str);
+            DQN_LOGGER_W(&context.logger, "No metadata could be parsed for file: %s", sound_file.key.str);
         }
 #else
-        av_dump_format(fmt_ctx, 0, sound_file.key.str, 0);
+        av_dump_format(fmt_context, 0, sound_file.key.str, 0);
 #endif
+    }
+
+    DqnWin32_GetExeNameAndDirectory(&context.allocator, &context.exe_name, &context.exe_directory);
+
+    for (SoundData const &sound_data : sounds)
+    {
+        DqnBuffer<char> dest_folder_path = AllocateSprintf(&global_tmp_allocator,
+                                                           "%s\\%s\\%s\\%s",
+                                                           context.exe_directory,
+                                                           sound_data.artist.str,
+                                                           sound_data.album.str,
+                                                           sound_data.title.str);
+        global_tmp_allocator.Pop(dest_folder_path.str);
     }
 
     return 0;
