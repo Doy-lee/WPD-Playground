@@ -23,6 +23,7 @@ struct Context
 {
     DqnLogger   logger;
     DqnMemStack allocator;
+    DqnMemStack tmp_allocator;
 
     DqnBuffer<char> exe_name;
     DqnBuffer<char> exe_directory;
@@ -71,6 +72,9 @@ void DqnWin32_GetExeNameAndDirectory(DqnMemStack *allocator, DqnBuffer<char> *ex
 {
     if (!exe_name && !exe_directory) return;
 
+    auto mem_guard                     = allocator->TempRegionGuard();
+    mem_guard.region.keep_head_changes = true;
+
     i32 offset_to_last_backslash = -1;
     int exe_buf_len              = 512;
     char *exe_buf                = nullptr;
@@ -78,11 +82,10 @@ void DqnWin32_GetExeNameAndDirectory(DqnMemStack *allocator, DqnBuffer<char> *ex
     {
         if (exe_buf)
         {
-            global_tmp_allocator.Pop(exe_buf);
             exe_buf_len += 128;
         }
 
-        exe_buf = (char *)global_tmp_allocator.Push(exe_buf_len * sizeof(char), DqnMemStack::AllocTo::Tail);
+        exe_buf = (char *)allocator->Push(exe_buf_len * sizeof(char), DqnMemStack::AllocTo::Tail);
         offset_to_last_backslash = DqnWin32_GetEXEDirectory(exe_buf, exe_buf_len);
     }
 
@@ -91,8 +94,6 @@ void DqnWin32_GetExeNameAndDirectory(DqnMemStack *allocator, DqnBuffer<char> *ex
 
     if (exe_directory)
         *exe_directory = CopyStringToBuffer(allocator, exe_buf, offset_to_last_backslash);
-
-    global_tmp_allocator.Pop(exe_buf);
 }
 
 char *WCharToUTF8(DqnMemStack *allocator, WCHAR const *wstr, int *result_len = nullptr)
@@ -100,6 +101,17 @@ char *WCharToUTF8(DqnMemStack *allocator, WCHAR const *wstr, int *result_len = n
     int required_len   = DqnWin32_WCharToUTF8(wstr, nullptr, 0);
     char *result       = DQN_MEMSTACK_PUSH_ARRAY(allocator, char, required_len);
     int convert_result = DqnWin32_WCharToUTF8(wstr, result, required_len);
+    DQN_ASSERTM(convert_result != -1, "UTF8 conversion error should never happen.");
+
+    if (result_len) *result_len = required_len;
+    return result;
+}
+
+wchar_t *UTF8ToWChar(DqnMemStack *allocator, char const *str, int *result_len = nullptr)
+{
+    int required_len   = DqnWin32_UTF8ToWChar(str, nullptr, 0);
+    wchar_t *result    = DQN_MEMSTACK_PUSH_ARRAY(allocator, wchar_t, required_len);
+    int convert_result = DqnWin32_UTF8ToWChar(str, result, required_len);
     DQN_ASSERTM(convert_result != -1, "UTF8 conversion error should never happen.");
 
     if (result_len) *result_len = required_len;
@@ -130,7 +142,7 @@ FILE_SCOPE void HandleComError(HRESULT hresult, char const *failing_function_nam
 // return: num_devices is set to 0 if no devices are available, otherwise the device_id and friendly name is set.
 SelectedDevice PromptAndSelectPortableDeviceID(Context *context)
 {
-    auto memGuard = global_tmp_allocator.TempRegionGuard();
+    auto mem_guard = context->tmp_allocator.TempRegionGuard();
 
     SelectedDevice result                         = {};
     HRESULT hresult                               = 0;
@@ -154,8 +166,8 @@ SelectedDevice PromptAndSelectPortableDeviceID(Context *context)
     if (num_devices == 0)
         return result;
 
-    WCHAR **device_names          = DQN_MEMSTACK_PUSH_ARRAY(&global_tmp_allocator, WCHAR *, num_devices);
-    WCHAR **friendly_device_names = DQN_MEMSTACK_PUSH_ARRAY(&global_tmp_allocator, WCHAR *, num_devices);
+    WCHAR **device_names          = DQN_MEMSTACK_PUSH_ARRAY(&context->tmp_allocator, WCHAR *, num_devices);
+    WCHAR **friendly_device_names = DQN_MEMSTACK_PUSH_ARRAY(&context->tmp_allocator, WCHAR *, num_devices);
     if (FAILED(hresult = device_manager->GetDevices(device_names, &num_devices)))
     {
         HANDLE_COM_ERROR(hresult, "IPortableDeviceManager::GetDevices", &context->logger);
@@ -172,14 +184,14 @@ SelectedDevice PromptAndSelectPortableDeviceID(Context *context)
             return result;
         }
 
-        WCHAR *friendly_name = DQN_MEMSTACK_PUSH_ARRAY(&global_tmp_allocator, WCHAR, friendly_name_len);
+        WCHAR *friendly_name = DQN_MEMSTACK_PUSH_ARRAY(&context->tmp_allocator, WCHAR, friendly_name_len);
         if (FAILED(device_manager->GetDeviceFriendlyName(name, friendly_name, &friendly_name_len)))
         {
             HANDLE_COM_ERROR(hresult, "IPortableDeviceManager::GetDeviceFriendlyName", &context->logger);
             return result;
         }
 
-        char *friendly_name_utf8 = WCharToUTF8(&global_tmp_allocator, friendly_name, nullptr);
+        char *friendly_name_utf8 = WCharToUTF8(&context->tmp_allocator, friendly_name, nullptr);
 
         if (num_devices > 10) fprintf(stdout, "    [%02zu] %s\n", device_index, friendly_name_utf8);
         else                  fprintf(stdout, "    [%zu] %s\n", device_index, friendly_name_utf8);
@@ -421,6 +433,8 @@ FILE_SCOPE bool PromptYesOrNoStdin(char const *yes_no_msg)
 
 FileNode const *PromptSelectFile(FileNode const *root, DqnFixedString2048 *curr_path)
 {
+    auto mem_guard = global_tmp_allocator.TempRegionGuard();
+
     FileNode const *result = root;
     {
         int name_utf8_len = 0;
@@ -521,35 +535,42 @@ FileNode const *PromptSelectFile(FileNode const *root, DqnFixedString2048 *curr_
     return result;
 }
 
+struct SoundMetadata
+{
+    DqnBuffer<wchar_t> album;
+    DqnBuffer<wchar_t> album_artist;
+    DqnBuffer<wchar_t> artist;
+    DqnBuffer<wchar_t> date;
+    DqnBuffer<wchar_t> disc;
+    DqnBuffer<wchar_t> genre;
+    DqnBuffer<wchar_t> title;
+    DqnBuffer<wchar_t> track;
+    DqnBuffer<wchar_t> tracktotal;
+};
+
 struct SoundData
 {
-    DqnBuffer<char> file_path;
-    DqnBuffer<char> album;
-    DqnBuffer<char> album_artist;
-    DqnBuffer<char> artist;
-    DqnBuffer<char> date;
-    DqnBuffer<char> disc;
-    DqnBuffer<char> genre;
-    DqnBuffer<char> title;
-    DqnBuffer<char> track;
-    DqnBuffer<char> tracktotal;
+    DqnBuffer<wchar_t> file_path;
+    DqnSlice <wchar_t> file_name;
+    DqnSlice <wchar_t> file_extension; // Slice into file_path
+    SoundMetadata      metadata;
 };
 
 struct SoundDataToDisk
 {
-    DqnBuffer<char> dest_file_path;
+    DqnBuffer<wchar_t> dest_file_path;
 };
 
-FILE_SCOPE DqnVHashTable<DqnBuffer<char>, SoundData> ReadPlaylistFile(Context *context, wchar_t const *file)
+FILE_SCOPE DqnVHashTable<DqnBuffer<wchar_t>, SoundData> ReadPlaylistFile(Context *context, wchar_t const *file)
 {
-    DqnVHashTable<DqnBuffer<char>, SoundData> result = {};
+    DqnVHashTable<DqnBuffer<wchar_t>, SoundData> result = {};
 
-    auto mem_guard = global_tmp_allocator.TempRegionGuard();
+    auto mem_guard = context->tmp_allocator.TempRegionGuard();
     usize buf_size = 0;
-    u8 *buf        = DqnFile_ReadAll(file, &buf_size, &global_tmp_allocator);
+    u8 *buf        = DqnFile_ReadAll(file, &buf_size, &context->tmp_allocator);
     if (!buf)
     {
-        DQN_LOGGER_W(&context->logger, "DqnFile_ReadAll: Failed, could not read file: %s\n", WCharToUTF8(&global_tmp_allocator, file));
+        DQN_LOGGER_W(&context->logger, "DqnFile_ReadAll: Failed, could not read file: %s\n", WCharToUTF8(&context->tmp_allocator, file));
         return result;
     }
 
@@ -563,15 +584,15 @@ FILE_SCOPE DqnVHashTable<DqnBuffer<char>, SoundData> ReadPlaylistFile(Context *c
     missing_files.LazyInit(DQN_MEGABYTE(1)/sizeof(missing_files.data[0]));
     DQN_DEFER(missing_files.Free());
 
-    int line_len = 0;
-    while (char *line = Dqn_EatLine(&buf_ptr, &line_len))
+    while (char *line = Dqn_EatLine(&buf_ptr, nullptr/*line_len*/))
     {
         if (line[0] == '#')
             continue;
 
         if (DqnFile_Size(line, nullptr))
         {
-            DqnBuffer<char> file_path = CopyStringToBuffer(&context->allocator, line, line_len);
+            DqnBuffer<wchar_t> file_path = {};
+            file_path.str                = UTF8ToWChar(&context->allocator, line, &file_path.len);
             result.GetOrMake(file_path);
         }
         else
@@ -580,8 +601,8 @@ FILE_SCOPE DqnVHashTable<DqnBuffer<char>, SoundData> ReadPlaylistFile(Context *c
         }
     }
 
-    for (DqnVHashTable<DqnBuffer<char>, SoundData>::Entry const &entry : result)
-        fprintf(stdout, "parsed line: %s\n", entry.key.str);
+    for (DqnVHashTable<DqnBuffer<wchar_t>, SoundData>::Entry const &entry : result)
+        fwprintf(stdout, L"parsed line: %s\n", entry.key.str);
 
     for (char const *missing_file : missing_files)
         fprintf(stdout, "could not access file in fs: %s\n", missing_file);
@@ -590,7 +611,7 @@ FILE_SCOPE DqnVHashTable<DqnBuffer<char>, SoundData> ReadPlaylistFile(Context *c
     return result;
 }
 
-FILE_SCOPE bool ExtractSoundMetadata(Context *context, AVDictionary const *dictionary, SoundData *sound_data)
+FILE_SCOPE bool ExtractSoundMetadata(DqnMemStack *allocator, AVDictionary const *dictionary, SoundMetadata *metadata)
 {
     bool atleast_one_entry_filled = false;
     if (!dictionary) return atleast_one_entry_filled;
@@ -600,24 +621,24 @@ FILE_SCOPE bool ExtractSoundMetadata(Context *context, AVDictionary const *dicti
 
     while (entry)
     {
-        DqnBuffer<char> *dest_buffer = nullptr;
-        const auto key               = DqnSlice<char>(entry->key, DqnStr_Len(entry->key));
+        DqnBuffer<wchar_t> *dest_buffer = nullptr;
+        const auto key                  = DqnSlice<char>(entry->key, DqnStr_Len(entry->key));
 
-        if      (DQN_BUFFER_STRCMP(key, DQN_BUFFER_STR_LIT("album"),        Dqn::IgnoreCase::Yes)) dest_buffer = &sound_data->album;
-        else if (DQN_BUFFER_STRCMP(key, DQN_BUFFER_STR_LIT("album_artist"), Dqn::IgnoreCase::Yes)) dest_buffer = &sound_data->album_artist;
-        else if (DQN_BUFFER_STRCMP(key, DQN_BUFFER_STR_LIT("artist"),       Dqn::IgnoreCase::Yes)) dest_buffer = &sound_data->artist;
-        else if (DQN_BUFFER_STRCMP(key, DQN_BUFFER_STR_LIT("date"),         Dqn::IgnoreCase::Yes)) dest_buffer = &sound_data->date;
-        else if (DQN_BUFFER_STRCMP(key, DQN_BUFFER_STR_LIT("disc"),         Dqn::IgnoreCase::Yes)) dest_buffer = &sound_data->disc;
-        else if (DQN_BUFFER_STRCMP(key, DQN_BUFFER_STR_LIT("genre"),        Dqn::IgnoreCase::Yes)) dest_buffer = &sound_data->genre;
-        else if (DQN_BUFFER_STRCMP(key, DQN_BUFFER_STR_LIT("title"),        Dqn::IgnoreCase::Yes)) dest_buffer = &sound_data->title;
-        else if (DQN_BUFFER_STRCMP(key, DQN_BUFFER_STR_LIT("track"),        Dqn::IgnoreCase::Yes)) dest_buffer = &sound_data->track;
-        else if (DQN_BUFFER_STRCMP(key, DQN_BUFFER_STR_LIT("tracktotal"),   Dqn::IgnoreCase::Yes)) dest_buffer = &sound_data->tracktotal;
+        if      (DQN_BUFFER_STRCMP(key, DQN_BUFFER_STR_LIT("album"),        Dqn::IgnoreCase::Yes)) dest_buffer = &metadata->album;
+        else if (DQN_BUFFER_STRCMP(key, DQN_BUFFER_STR_LIT("album_artist"), Dqn::IgnoreCase::Yes)) dest_buffer = &metadata->album_artist;
+        else if (DQN_BUFFER_STRCMP(key, DQN_BUFFER_STR_LIT("artist"),       Dqn::IgnoreCase::Yes)) dest_buffer = &metadata->artist;
+        else if (DQN_BUFFER_STRCMP(key, DQN_BUFFER_STR_LIT("date"),         Dqn::IgnoreCase::Yes)) dest_buffer = &metadata->date;
+        else if (DQN_BUFFER_STRCMP(key, DQN_BUFFER_STR_LIT("disc"),         Dqn::IgnoreCase::Yes)) dest_buffer = &metadata->disc;
+        else if (DQN_BUFFER_STRCMP(key, DQN_BUFFER_STR_LIT("genre"),        Dqn::IgnoreCase::Yes)) dest_buffer = &metadata->genre;
+        else if (DQN_BUFFER_STRCMP(key, DQN_BUFFER_STR_LIT("title"),        Dqn::IgnoreCase::Yes)) dest_buffer = &metadata->title;
+        else if (DQN_BUFFER_STRCMP(key, DQN_BUFFER_STR_LIT("track"),        Dqn::IgnoreCase::Yes)) dest_buffer = &metadata->track;
+        else if (DQN_BUFFER_STRCMP(key, DQN_BUFFER_STR_LIT("tracktotal"),   Dqn::IgnoreCase::Yes)) dest_buffer = &metadata->tracktotal;
 
         if (dest_buffer && dest_buffer->len == 0)
         {
             atleast_one_entry_filled = true;
-            const auto value = DqnSlice<char>(entry->value, DqnStr_Len(entry->value));
-            *dest_buffer     = CopyStringToBuffer(&context->allocator, value.str, value.len);
+            const auto value         = DqnSlice<char>(entry->value, DqnStr_Len(entry->value));
+            dest_buffer->str = UTF8ToWChar(allocator, value.str, &dest_buffer->len);
         }
 
         AVDictionaryEntry const *prev_entry = entry;
@@ -627,27 +648,53 @@ FILE_SCOPE bool ExtractSoundMetadata(Context *context, AVDictionary const *dicti
     return atleast_one_entry_filled;
 }
 
-DqnBuffer<char> AllocateSprintf(DqnMemStack *allocator, char const *fmt, ...)
+DqnBuffer<char> AllocateSprintf(DqnMemStack *allocator, char const *fmt, va_list const va)
 {
-
     DqnBuffer<char> result = {};
-
-    va_list va;
-    va_start(va, fmt);
     result.len = Dqn_vsnprintf(nullptr, 0, fmt, va) + 1;
     result.str = DQN_MEMSTACK_PUSH_ARRAY(allocator, char, result.len);
     Dqn_vsnprintf(result.str, result.len, fmt, va);
+    return result;
+}
+
+DqnBuffer<char> AllocateSprintf(DqnMemStack *allocator, char const *fmt, ...)
+{
+    DqnBuffer<char> result = {};
+    va_list va;
+    va_start(va, fmt);
+    AllocateSprintf(allocator, fmt, va);
+    va_end(va);
+    return result;
+}
+
+DqnBuffer<wchar_t> AllocateSwprintf(DqnMemStack *allocator, char const *fmt, ...)
+{
+    va_list va;
+    va_start(va, fmt);
+    DqnBuffer<char> result_utf8 = {};
+    result_utf8.len             = Dqn_vsnprintf(nullptr, 0, fmt, va) + 1;
+    result_utf8.str             = DQN_MEMSTACK_PUSH_TAIL_ARRAY(allocator, char, result_utf8.len);
+    Dqn_vsnprintf(result_utf8.str, result_utf8.len, fmt, va);
     va_end(va);
 
+    DqnBuffer<wchar_t> result = {};
+    result.str                = UTF8ToWChar(allocator, result_utf8.str, &result.len);
+    allocator->Pop(result_utf8.str);
     return result;
+}
+
+void CheckAllocatorHasZeroAllocations(DqnMemStack const *allocator)
+{
+    DQN_ASSERTM(!allocator->block->prev_block, "Allocator should not have multiple blocks at zero allocations, just the initial block.");
+    DQN_ASSERTM(allocator->block->Usage() == 0, "Allocator has non-zero memory usage: %zu\n", allocator->block->Usage());
 }
 
 int main(int, char)
 {
-    global_tmp_allocator = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroClear::Yes, DqnMemStack::Flag::All);
-
-    Context context   = {};
-    context.allocator = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroClear::Yes, DqnMemStack::Flag::All);
+    Context context       = {};
+    context.allocator     = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroClear::Yes, DqnMemStack::Flag::All);
+    context.tmp_allocator = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroClear::Yes, DqnMemStack::Flag::All);
+    global_tmp_allocator  = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroClear::Yes, DqnMemStack::Flag::All);
 
 #if 0
     HRESULT hresult = 0;
@@ -697,16 +744,22 @@ int main(int, char)
 
 #endif
 
-    DqnVHashTable<DqnBuffer<char>, SoundData> playlist = ReadPlaylistFile(&context, L"Data/test.m3u8");
+    DqnVHashTable<DqnBuffer<wchar_t>, SoundData> playlist = ReadPlaylistFile(&context, L"Data/test.m3u8");
     auto sounds = DqnVArray<SoundData>(playlist.num_used_buckets);
     DQN_DEFER(playlist.Free());
 
-    for (DqnVHashTable<DqnBuffer<char>, SoundData>::Entry const &sound_file : playlist)
+    for (DqnVHashTable<DqnBuffer<wchar_t>, SoundData>::Entry const &sound_file : playlist)
     {
+        CheckAllocatorHasZeroAllocations(&global_tmp_allocator);
         AVFormatContext *fmt_context = nullptr;
-        if (avformat_open_input(&fmt_context, sound_file.key.str, nullptr, nullptr))
+        auto mem_guard               = global_tmp_allocator.TempRegionGuard();
+
+        DqnBuffer<wchar_t> const sound_path = sound_file.key;
+        DqnBuffer<char> sound_path_utf8     = {};
+        sound_path_utf8.str                 = WCharToUTF8(&global_tmp_allocator, sound_path.str);
+        if (avformat_open_input(&fmt_context, sound_path_utf8.str, nullptr, nullptr))
         {
-            DQN_LOGGER_E(&context.logger, "avformat_open_input: failed to open file: %s", sound_file.key.str);
+            DQN_LOGGER_E(&context.logger, "avformat_open_input: failed to open file: %s", sound_path_utf8.str);
             continue;
         }
         DQN_DEFER(avformat_close_input(&fmt_context));
@@ -719,25 +772,56 @@ int main(int, char)
         }
 
 #if 1
-        SoundData sound_data          = {};
-        bool atleast_one_entry_filled = ExtractSoundMetadata(&context, fmt_context->metadata, &sound_data);
+        SoundData sound_data = {};
+        sound_data.file_path = CopyWStringToBuffer(&context.allocator, sound_file.key.str, sound_file.key.len);
+        for (isize i = sound_data.file_path.len; i >= 0; --i)
+        {
+            if (sound_data.file_path.str[i] == '.')
+            {
+                sound_data.file_extension.str = sound_path.str + (i + 1);
+                sound_data.file_extension.len = static_cast<int>(sound_path.len - i);
+                break;
+            }
+        }
+
+        if (!sound_data.file_path)
+        {
+            DQN_LOGGER_E(&context.logger, "Could not figure out the file extension for file path: %s", sound_path_utf8.str);
+            continue;
+        }
+
+        for (isize i = sound_data.file_extension.len; i >= 0; --i)
+        {
+            if (sound_data.file_extension.str[i] == '\\')
+            {
+                sound_data.file_name.str = sound_path.str + (i + 1);
+                sound_data.file_name.len = static_cast<int>(sound_path.len - i);
+                break;
+            }
+        }
+
+        if (!sound_data.file_extension)
+        {
+            DQN_LOGGER_E(&context.logger, "Could not figure out the file name for file path: %s", sound_path_utf8.str);
+            continue;
+        }
+
+        bool atleast_one_entry_filled = ExtractSoundMetadata(&context.allocator, fmt_context->metadata, &sound_data.metadata);
         DQN_FOR_EACH(i, fmt_context->nb_streams)
         {
             AVStream const *stream = fmt_context->streams[i];
-            atleast_one_entry_filled |= ExtractSoundMetadata(&context, stream->metadata, &sound_data);
+            atleast_one_entry_filled |= ExtractSoundMetadata(&context.allocator, stream->metadata, &sound_data.metadata);
         }
 
-        if (atleast_one_entry_filled)
-        {
-            sound_data.file_path = CopyStringToBuffer(&context.allocator, sound_file.key.str, sound_file.key.len);
-            sounds.Push(sound_data);
-        }
-        else
+        if (!atleast_one_entry_filled)
         {
             DQN_LOGGER_W(&context.logger, "No metadata could be parsed for file: %s", sound_file.key.str);
+            continue;
         }
+
+        sounds.Push(sound_data);
 #else
-        av_dump_format(fmt_context, 0, sound_file.key.str, 0);
+        av_dump_format(fmt_context, 0, sound_file_path.str, 0);
 #endif
     }
 
@@ -745,13 +829,20 @@ int main(int, char)
 
     for (SoundData const &sound_data : sounds)
     {
-        DqnBuffer<char> dest_folder_path = AllocateSprintf(&global_tmp_allocator,
-                                                           "%s\\%s\\%s\\%s",
-                                                           context.exe_directory,
-                                                           sound_data.artist.str,
-                                                           sound_data.album.str,
-                                                           sound_data.title.str);
-        global_tmp_allocator.Pop(dest_folder_path.str);
+        CheckAllocatorHasZeroAllocations(&global_tmp_allocator);
+        auto mem_guard = context.tmp_allocator.TempRegionGuard();
+        wchar_t const *artist = (sound_data.metadata.artist) ? sound_data.metadata.artist.str : L"_";
+        wchar_t const *album  = (sound_data.metadata.album) ? sound_data.metadata.album.str : L"_";
+        wchar_t const *title  = (sound_data.metadata.title) ? sound_data.metadata.title.str : sound_data.file_name.str;
+
+        DqnBuffer<wchar_t> dest_folder_path =
+            AllocateSwprintf(&context.tmp_allocator,
+                             "%s\\%s\\%s\\%s",
+                             context.exe_directory.str,
+                             WCharToUTF8(&context.tmp_allocator, artist),
+                             WCharToUTF8(&context.tmp_allocator, album),
+                             WCharToUTF8(&context.tmp_allocator, title));
+        int break_ehre = 5;
     }
 
     return 0;
