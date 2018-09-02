@@ -419,7 +419,7 @@ FILE_SCOPE bool PromptYesOrNoStdin(char const *yes_no_msg)
 
 FileNode const *PromptSelectFile(FileNode const *root, DqnFixedString2048 *curr_path)
 {
-    auto mem_region = global_func_local_allocator_.MemRegionScoped();
+    auto mem_region = global_func_local_allocator_.MemRegionScope();
 
     FileNode const *result = root;
     {
@@ -542,16 +542,11 @@ struct SoundFile
     SoundMetadata      metadata;
 };
 
-struct SoundFileToDisk
-{
-    DqnBuffer<wchar_t> dest_file_path;
-};
-
 FILE_SCOPE DqnVHashTable<DqnBuffer<wchar_t>, SoundFile> ReadPlaylistFile(Context *context, wchar_t const *file)
 {
-    DqnVHashTable<DqnBuffer<wchar_t>, SoundFile> result = {};
+    DqnVHashTable<DqnBuffer<wchar_t>, SoundFile> result(DQN_MEGABYTE(16));
 
-    auto mem_region = global_func_local_allocator_.MemRegionScoped();
+    auto DQN_UNIQUE_NAME(mem_region) = global_func_local_allocator_.MemRegionScope();
     usize buf_size = 0;
     u8 *buf        = DqnFile_ReadAll(file, &buf_size, &global_func_local_allocator_);
     if (!buf)
@@ -566,10 +561,6 @@ FILE_SCOPE DqnVHashTable<DqnBuffer<wchar_t>, SoundFile> ReadPlaylistFile(Context
     if (buf_size > 3 && (u8)buf_ptr[0] == 0xEF && (u8)buf_ptr[1] == 0xBB && (u8)buf_ptr[2] == 0xBF)
         buf_ptr += 3;
 
-    DqnVArray<char *> missing_files = {};
-    missing_files.LazyInit(DQN_MEGABYTE(1)/sizeof(missing_files.data[0]));
-    DQN_DEFER { missing_files.Free(); };
-
     while (char *line = Dqn_EatLine(&buf_ptr, nullptr/*line_len*/))
     {
         if (line[0] == '#')
@@ -583,16 +574,14 @@ FILE_SCOPE DqnVHashTable<DqnBuffer<wchar_t>, SoundFile> ReadPlaylistFile(Context
         }
         else
         {
-            missing_files.Push(line);
+            fprintf(stdout, "Could not access file in file system: %s\n", line);
         }
     }
 
+#if 0
     for (DqnVHashTable<DqnBuffer<wchar_t>, SoundFile>::Entry const &entry : result)
         fwprintf(stdout, L"parsed line: %s\n", entry.key.str);
-
-    for (char const *missing_file : missing_files)
-        fprintf(stdout, "could not access file in fs: %s\n", missing_file);
-
+#endif
 
     return result;
 }
@@ -654,18 +643,21 @@ void CheckAllocatorHasZeroAllocations(DqnMemStack const *allocator)
 
 DqnArray<SoundFile> MakeSoundFiles(Context *context, DqnVHashTable<DqnBuffer<wchar_t>, SoundFile> *playlist)
 {
-    void *buf = context->allocator.Push(playlist->num_used_buckets * sizeof(SoundFile));
-    auto result = DqnArray<SoundFile>(static_cast<SoundFile *>(buf), playlist->num_used_buckets);
+    void *buf = context->allocator.Push(playlist->num_used_entries * sizeof(SoundFile));
+    auto result = DqnArray<SoundFile>(static_cast<SoundFile *>(buf), playlist->num_used_entries);
 
     for (DqnVHashTable<DqnBuffer<wchar_t>, SoundFile>::Entry const &entry : *playlist)
     {
         CheckAllocatorHasZeroAllocations(&global_func_local_allocator_);
-        AVFormatContext *fmt_context = nullptr;
-        auto mem_region               = global_func_local_allocator_.MemRegionScoped();
+
+        auto DQN_UNIQUE_NAME(mem_region) = global_func_local_allocator_.MemRegionScope();
+        auto mem_region                  = context->allocator.MemRegionScope();
 
         DqnBuffer<wchar_t> const sound_path = entry.key;
         DqnBuffer<char> sound_path_utf8     = {};
         sound_path_utf8.str                 = WCharToUTF8(&global_func_local_allocator_, sound_path.str);
+
+        AVFormatContext *fmt_context = nullptr;
         if (avformat_open_input(&fmt_context, sound_path_utf8.str, nullptr, nullptr))
         {
             DQN_LOGGER_E(&context->logger, "avformat_open_input: failed to open file: %s", sound_path_utf8.str);
@@ -728,6 +720,7 @@ DqnArray<SoundFile> MakeSoundFiles(Context *context, DqnVHashTable<DqnBuffer<wch
             continue;
         }
 
+        context->allocator.MemRegionSave(mem_region);
         result.Push(sound_file);
 #else
         av_dump_format(fmt_context, 0, sound_file_path.str, 0);
@@ -744,6 +737,7 @@ int main(int, char)
     global_func_local_allocator_ = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroMem::Yes, DqnMemStack::Flag::DefaultFlags);
     DqnWin32_GetExeNameAndDirectory(&context.allocator, &context.exe_name, &context.exe_directory);
 
+#if 0
     HRESULT hresult = 0;
     if (FAILED(hresult = CoInitializeEx(0, COINIT_SPEED_OVER_MEMORY)))
     {
@@ -788,10 +782,16 @@ int main(int, char)
 
     DqnFixedString2048 abs_file_path = {};
     FileNode const *chosen_path      = PromptSelectFile(&root, &abs_file_path);
+#endif
 
-    DqnVHashTable<DqnBuffer<wchar_t>, SoundFile> playlist = ReadPlaylistFile(&context, L"Data/test.m3u8");
-    DqnArray<SoundFile> sounds = MakeSoundFiles(&context, &playlist);
+    DqnVHashTable<DqnBuffer<wchar_t>, SoundFile> playlist = ReadPlaylistFile(&context, L"Data/test2.m3u8");
+    DqnArray<SoundFile> sounds                            = MakeSoundFiles(&context, &playlist);
 
+    isize sounds_to_dest_path_num = sounds.len;
+    auto *sounds_to_dest_path_mem = DQN_MEMSTACK_PUSH_ARRAY(&context.allocator, DqnBuffer<char>, sounds_to_dest_path_num);
+    DqnArray<DqnBuffer<char>> sounds_to_dest_path(sounds_to_dest_path_mem, sounds_to_dest_path_num);
+
+    isize estimated_buf_chars = sounds.len; // for each sound file path, we also need a new line \n
     for (SoundFile const &sound_file : sounds)
     {
         CheckAllocatorHasZeroAllocations(&global_func_local_allocator_);
@@ -799,20 +799,41 @@ int main(int, char)
         wchar_t const *album  = (sound_file.metadata.album)  ? sound_file.metadata.album.str : L"_";
         wchar_t const *title  = (sound_file.metadata.title)  ? sound_file.metadata.title.str : sound_file.name.str;
 
-        DqnBuffer<wchar_t> dest_folder_path = AllocateSwprintf(&context.allocator, L"%s\\Files\\%s\\%s\\%s.%s", context.exe_directory.str, artist, album, title, sound_file.extension.str);
+        context.allocator.SetAllocMode(DqnMemStack::AllocMode::Tail);
+        DqnBuffer<wchar_t> dest_folder_path = AllocateSwprintf(&context.allocator,
+                                                               L"%s\\Files\\%s\\%s\\%s.%s",
+                                                               context.exe_directory.str,
+                                                               artist,
+                                                               album,
+                                                               title,
+                                                               sound_file.extension.str);
+        context.allocator.SetAllocMode(DqnMemStack::AllocMode::Head);
+        DQN_DEFER { context.allocator.Pop(dest_folder_path.str); };
 
-        auto mem_region = context.allocator.MemRegionScoped();
-        DQN_LOGGER_D(&context.logger, "%s", WCharToUTF8(&context.allocator, dest_folder_path.str));
+        DqnBuffer<char> *dest_folder_path_utf8 = sounds_to_dest_path.Make();
+        dest_folder_path_utf8->str = WCharToUTF8(&context.allocator, dest_folder_path.str, &dest_folder_path_utf8->len);
+
+        estimated_buf_chars += dest_folder_path_utf8->len;
+        DQN_LOGGER_D(&context.logger, "%s", dest_folder_path_utf8->str);
     }
 
-    DqnFile m3u_file      = {};
-    if (!m3u_file.Open("test.m3u8", DqnFile::Flag::FileReadWrite, DqnFile::Action::ForceCreate))
+    DqnArray<char> m3u_buf = {};
+    m3u_buf.Reserve(estimated_buf_chars + /*safety_margin*/ 1024);
+    for (DqnBuffer<char> const &output_path : sounds_to_dest_path)
     {
-        DQN_LOGGER_E(&context.logger, "DqnFile::open failed: Could not create file: test.m3u8");
-        return -1;
+        auto DQN_UNIQUE_NAME(mem_scope) = context.allocator.MemRegionScope();
+        m3u_buf.Push(output_path.str, output_path.len - 1);
+        m3u_buf.Push('\n');
     }
+    m3u_buf.Push('\0');
 
-    DQN_DEFER { m3u_file.Close(); };
+    // NOTE(doyle): len - 1, don't write the null terminating byte
+    if (!DqnFile_WriteAll("Data/output_result.m3u8",
+                          reinterpret_cast<u8 *>(m3u_buf.data),
+                          (m3u_buf.len - 1) * sizeof(m3u_buf.data[0])))
+    {
+        DQN_LOGGER_E(&context.logger, "DqnFile_WriteAll failed: Could not write m3u file to destination.");
+    }
 
     return 0;
 }
