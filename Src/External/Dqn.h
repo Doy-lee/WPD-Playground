@@ -1420,8 +1420,6 @@ struct DqnMemTracker
 
 #define DQN_MEMSTACK_PUSH_STRUCT(memstack, Type)     (Type *)(memstack)->Push(sizeof(Type))
 #define DQN_MEMSTACK_PUSH_ARRAY(memstack, Type, num) (Type *)(memstack)->Push(sizeof(Type) * (num))
-#define DQN_MEMSTACK_PUSH_TAIL_STRUCT(memstack, Type)     (Type *)(memstack)->Push(sizeof(Type), DqnMemStack::AllocTo::Tail)
-#define DQN_MEMSTACK_PUSH_TAIL_ARRAY(memstack, Type, num) (Type *)(memstack)->Push(sizeof(Type) * (num), DqnMemStack::AllocTo::Tail)
 struct DqnMemStack
 {
     static const i32 MINIMUM_BLOCK_SIZE = DQN_KILOBYTE(64);
@@ -1432,7 +1430,8 @@ struct DqnMemStack
         NonExpandableAssert = (1 << 1), // Assert when non-expandable is set and we run out of space
         BoundsGuard         = (1 << 2), // Track, check and add 4 byte guards on the boundaries of all allocations
         PushAssertsOnFail   = (1 << 3), // Assert when push() fails.
-        All                 = (NonExpandable | NonExpandableAssert | BoundsGuard | PushAssertsOnFail),
+        DefaultAllocateTail = (1 << 4), // If set, allocate to tail when push_type is unspecified, otherwise allocate to head
+        DefaultFlags        = (NonExpandable | NonExpandableAssert | BoundsGuard | PushAssertsOnFail),
     };
 
     struct Info // Statistics of the memory stack.
@@ -1473,12 +1472,13 @@ struct DqnMemStack
 
     // Allocation API
     // =============================================================================================
-    enum struct AllocTo { Head, Tail };
+    enum struct PushType { Default, Head, Tail };
 
     // Allocate memory from the MemStack.
     // alignment: Ptr returned from allocator is aligned to this value and MUST be power of 2.
     // return:    nullptr if out of space OR stack is using fixed memory/size OR stack full and platform malloc fails.
-    void *Push          (isize size, AllocTo allocTo = AllocTo::Head, u8 alignment = 4);
+    void *Push              (isize size, PushType push_type = PushType::Default, u8 alignment = 4);
+    void  SetDefaultAllocate(PushType type)                                                         { if (type == PushType::Default) return; if (type == PushType::Head) flags |= Flag::DefaultAllocateTail; else flags &= ~Flag::DefaultAllocateTail; }
 
     // Frees the given ptr. It MUST be the last allocated item in the stack, asserts otherwise.
     void  Pop           (void *ptr, Dqn::ZeroClear clear = Dqn::ZeroClear::No);
@@ -1535,10 +1535,10 @@ struct DqnMemStack
     void  FreeHead   (void   *ptr)              { (void)ptr; return; }
     void *ReallocHead(void   *ptr, size_t size) { DqnPtrHeader *header = tracker.PtrToHeader((char *)ptr); void *result = Push(size); DqnMem_Copy(result, ptr, header->alloc_amount); return result; }
 
-    void *MallocTail (size_t size)              { return Push(size, AllocTo::Tail); }
-    void *CallocTail (size_t size)              { void *result = Push(size, AllocTo::Tail); DqnMem_Clear(result, 0, size); }
+    void *MallocTail (size_t size)              { return Push(size, PushType::Tail); }
+    void *CallocTail (size_t size)              { void *result = Push(size, PushType::Tail); DqnMem_Clear(result, 0, size); }
     void  FreeTail   (void   *ptr)              { (void)ptr; return; }
-    void *ReallocTail(void   *ptr, size_t size) { DqnPtrHeader *header = tracker.PtrToHeader((char *)ptr); void *result = Push(size, AllocTo::Tail); DqnMem_Copy(result, ptr, header->alloc_amount); return result; }
+    void *ReallocTail(void   *ptr, size_t size) { DqnPtrHeader *header = tracker.PtrToHeader((char *)ptr); void *result = Push(size, PushType::Tail); DqnMem_Copy(result, ptr, header->alloc_amount); return result; }
 };
 
 // #DqnHash API
@@ -2410,8 +2410,8 @@ DQN_FILE_SCOPE bool   DqnFile_ReadAll(wchar_t const *path, u8 *buf, usize buf_si
 // return: False if file access failure OR nullptr arguments.
 DQN_FILE_SCOPE u8    *DqnFile_ReadAll(char    const *path, usize *buf_size, DqnAllocator *allocator = DQN_DEFAULT_ALLOCATOR);
 DQN_FILE_SCOPE u8    *DqnFile_ReadAll(wchar_t const *path, usize *buf_size, DqnAllocator *allocator = DQN_DEFAULT_ALLOCATOR);
-DQN_FILE_SCOPE u8    *DqnFile_ReadAll(wchar_t const *path, usize *buf_size, DqnMemStack *stack, DqnMemStack::AllocTo allocTo = DqnMemStack::AllocTo::Head);
-DQN_FILE_SCOPE u8    *DqnFile_ReadAll(char    const *path, usize *buf_size, DqnMemStack *stack, DqnMemStack::AllocTo allocTo = DqnMemStack::AllocTo::Head);
+DQN_FILE_SCOPE u8    *DqnFile_ReadAll(wchar_t const *path, usize *buf_size, DqnMemStack *stack, DqnMemStack::PushType push_type = DqnMemStack::PushType::Head);
+DQN_FILE_SCOPE u8    *DqnFile_ReadAll(char    const *path, usize *buf_size, DqnMemStack *stack, DqnMemStack::PushType push_type = DqnMemStack::PushType::Head);
 
 DQN_FILE_SCOPE bool  DqnFile_WriteAll(char    const *path, u8 const *buf, usize const buf_size);
 DQN_FILE_SCOPE bool  DqnFile_WriteAll(wchar_t const *path, u8 const *buf, usize const buf_size);
@@ -2992,19 +2992,29 @@ void DqnMemStack::LazyInit(isize size, Dqn::ZeroClear clear, u32 flags_, DqnAllo
     this->tracker.Init(bounds_guard);
 }
 
-void *DqnMemStack::Push(isize size, AllocTo allocTo, u8 alignment)
+void *DqnMemStack::Push(isize size, PushType push_type, u8 alignment)
 {
     DQN_ASSERT(size >= 0 && (alignment % 2 == 0));
-    DQN_ALWAYS_ASSERTM(alignment <= 128, "Alignment supported. Update metadata to use u16 for storing the offset!");
+    DQN_ALWAYS_ASSERTM(alignment <= 128, "Alignment _not_ supported. Update metadata to use u16 for storing the offset!");
 
     if (size == 0)
         return nullptr;
 
     if (!this->block)
-        LazyInit(MINIMUM_BLOCK_SIZE, Dqn::ZeroClear::Yes, Flag::All, DQN_DEFAULT_ALLOCATOR);
+        LazyInit(MINIMUM_BLOCK_SIZE, Dqn::ZeroClear::Yes, Flag::DefaultFlags, DQN_DEFAULT_ALLOCATOR);
 
-    bool const push_to_head = (allocTo == AllocTo::Head);
-    isize size_to_alloc     = this->tracker.GetAllocationSize(size, alignment);
+    isize size_to_alloc = this->tracker.GetAllocationSize(size, alignment);
+    bool push_to_head   = true;
+    if (push_type == PushType::Default)
+    {
+        if (this->flags & Flag::DefaultAllocateTail) push_to_head = false;
+        else                                         push_to_head = true;
+    }
+    else
+    {
+        push_to_head = (push_type == PushType::Head);
+    }
+
 
     // Allocate New Block If Full
     // =============================================================================================
@@ -7762,7 +7772,7 @@ DQN_FILE_SCOPE u8 *DqnFile_ReadAll(char const *path, usize *buf_size, DqnAllocat
     return nullptr;
 }
 
-DQN_FILE_SCOPE u8 *DqnFile_ReadAll(wchar_t const *path, usize *buf_size, DqnMemStack *stack, DqnMemStack::AllocTo allocTo)
+DQN_FILE_SCOPE u8 *DqnFile_ReadAll(wchar_t const *path, usize *buf_size, DqnMemStack *stack, DqnMemStack::PushType push_type)
 {
     u8 *result = nullptr;
     DqnFile file = {};
@@ -7773,7 +7783,7 @@ DQN_FILE_SCOPE u8 *DqnFile_ReadAll(wchar_t const *path, usize *buf_size, DqnMemS
     }
     DQN_DEFER(file.Close());
 
-    result = static_cast<u8 *>(stack->Push(file.size, allocTo));
+    result = static_cast<u8 *>(stack->Push(file.size, push_type));
     usize bytes_read = file.Read(result, file.size);
     if (bytes_read == file.size)
     {
@@ -7787,7 +7797,7 @@ DQN_FILE_SCOPE u8 *DqnFile_ReadAll(wchar_t const *path, usize *buf_size, DqnMemS
     return result;
 }
 
-DQN_FILE_SCOPE u8 *DqnFile_ReadAll(char const *path, usize *buf_size, DqnMemStack *stack, DqnMemStack::AllocTo allocTo)
+DQN_FILE_SCOPE u8 *DqnFile_ReadAll(char const *path, usize *buf_size, DqnMemStack *stack, DqnMemStack::PushType push_type)
 {
     u8 *result = nullptr;
     DqnFile file = {};
@@ -7798,7 +7808,7 @@ DQN_FILE_SCOPE u8 *DqnFile_ReadAll(char const *path, usize *buf_size, DqnMemStac
     }
     DQN_DEFER(file.Close());
 
-    result = static_cast<u8 *>(stack->Push(file.size, allocTo));
+    result = static_cast<u8 *>(stack->Push(file.size, push_type));
     usize bytes_read = file.Read(result, file.size);
     if (bytes_read == file.size)
     {

@@ -23,7 +23,6 @@ struct Context
 {
     DqnLogger   logger;
     DqnMemStack allocator;
-    DqnMemStack tmp_allocator;
 
     DqnBuffer<char> exe_name;
     DqnBuffer<char> exe_directory;
@@ -42,7 +41,7 @@ struct State
     ComPtr<IPortableDevice> opened_device;
 };
 
-FILE_SCOPE DqnMemStack global_tmp_allocator;
+FILE_SCOPE DqnMemStack global_func_local_allocator_;
 
 DqnBuffer<wchar_t> CopyWStringToBuffer(DqnMemStack *allocator, wchar_t const *str_to_copy, int len = -1)
 {
@@ -85,7 +84,7 @@ void DqnWin32_GetExeNameAndDirectory(DqnMemStack *allocator, DqnBuffer<char> *ex
             exe_buf_len += 128;
         }
 
-        exe_buf = (char *)allocator->Push(exe_buf_len * sizeof(char), DqnMemStack::AllocTo::Tail);
+        exe_buf = (char *)allocator->Push(exe_buf_len * sizeof(char), DqnMemStack::PushType::Tail);
         offset_to_last_backslash = DqnWin32_GetEXEDirectory(exe_buf, exe_buf_len);
     }
 
@@ -142,7 +141,7 @@ FILE_SCOPE void HandleComError(HRESULT hresult, char const *failing_function_nam
 // return: num_devices is set to 0 if no devices are available, otherwise the device_id and friendly name is set.
 SelectedDevice PromptAndSelectPortableDeviceID(Context *context)
 {
-    auto mem_guard = context->tmp_allocator.TempRegionGuard();
+    auto mem_guard = global_func_local_allocator_.TempRegionGuard();
 
     SelectedDevice result                         = {};
     HRESULT hresult                               = 0;
@@ -166,8 +165,8 @@ SelectedDevice PromptAndSelectPortableDeviceID(Context *context)
     if (num_devices == 0)
         return result;
 
-    WCHAR **device_names          = DQN_MEMSTACK_PUSH_ARRAY(&context->tmp_allocator, WCHAR *, num_devices);
-    WCHAR **friendly_device_names = DQN_MEMSTACK_PUSH_ARRAY(&context->tmp_allocator, WCHAR *, num_devices);
+    WCHAR **device_names          = DQN_MEMSTACK_PUSH_ARRAY(&global_func_local_allocator_, WCHAR *, num_devices);
+    WCHAR **friendly_device_names = DQN_MEMSTACK_PUSH_ARRAY(&global_func_local_allocator_, WCHAR *, num_devices);
     if (FAILED(hresult = device_manager->GetDevices(device_names, &num_devices)))
     {
         HANDLE_COM_ERROR(hresult, "IPortableDeviceManager::GetDevices", &context->logger);
@@ -184,14 +183,14 @@ SelectedDevice PromptAndSelectPortableDeviceID(Context *context)
             return result;
         }
 
-        WCHAR *friendly_name = DQN_MEMSTACK_PUSH_ARRAY(&context->tmp_allocator, WCHAR, friendly_name_len);
+        WCHAR *friendly_name = DQN_MEMSTACK_PUSH_ARRAY(&global_func_local_allocator_, WCHAR, friendly_name_len);
         if (FAILED(device_manager->GetDeviceFriendlyName(name, friendly_name, &friendly_name_len)))
         {
             HANDLE_COM_ERROR(hresult, "IPortableDeviceManager::GetDeviceFriendlyName", &context->logger);
             return result;
         }
 
-        char *friendly_name_utf8 = WCharToUTF8(&context->tmp_allocator, friendly_name, nullptr);
+        char *friendly_name_utf8 = WCharToUTF8(&global_func_local_allocator_, friendly_name, nullptr);
 
         if (num_devices > 10) fprintf(stdout, "    [%02zu] %s\n", device_index, friendly_name_utf8);
         else                  fprintf(stdout, "    [%zu] %s\n", device_index, friendly_name_utf8);
@@ -433,24 +432,24 @@ FILE_SCOPE bool PromptYesOrNoStdin(char const *yes_no_msg)
 
 FileNode const *PromptSelectFile(FileNode const *root, DqnFixedString2048 *curr_path)
 {
-    auto mem_guard = global_tmp_allocator.TempRegionGuard();
+    auto mem_guard = global_func_local_allocator_.TempRegionGuard();
 
     FileNode const *result = root;
     {
         int name_utf8_len = 0;
-        char *name_utf8   = WCharToUTF8(&global_tmp_allocator, result->name.str, &name_utf8_len);
+        char *name_utf8   = WCharToUTF8(&global_func_local_allocator_, result->name.str, &name_utf8_len);
         curr_path->SprintfAppend("/%.*s", name_utf8_len, name_utf8);
-        global_tmp_allocator.Pop(name_utf8);
+        global_func_local_allocator_.Pop(name_utf8);
         result = root->child;
     }
 
     bool exit_prompt               = false;
     FileNode const **index_to_node = nullptr;
-    for (char input_buf[8]; !exit_prompt; global_tmp_allocator.Pop(index_to_node), system("cls"))
+    for (char input_buf[8]; !exit_prompt; global_func_local_allocator_.Pop(index_to_node), system("cls"))
     {
         input_buf[0]          = 0;
         isize const num_nodes = result->parent->num_children;
-        index_to_node         = DQN_MEMSTACK_PUSH_ARRAY(&global_tmp_allocator, FileNode const *, num_nodes);
+        index_to_node         = DQN_MEMSTACK_PUSH_ARRAY(&global_func_local_allocator_, FileNode const *, num_nodes);
 
         // Print interactive display and generate index_to_node array
         {
@@ -516,9 +515,9 @@ FileNode const *PromptSelectFile(FileNode const *root, DqnFixedString2048 *curr_
             {
                 result         = index_to_node[choice];
                 int node_name_len = 0;
-                char *node_name   = WCharToUTF8(&global_tmp_allocator, result->name.str, &node_name_len);
+                char *node_name   = WCharToUTF8(&global_func_local_allocator_, result->name.str, &node_name_len);
                 curr_path->SprintfAppend("/%.*s", node_name_len, node_name);
-                global_tmp_allocator.Pop(node_name);
+                global_func_local_allocator_.Pop(node_name);
 
                 if (result->child)
                 {
@@ -565,12 +564,12 @@ FILE_SCOPE DqnVHashTable<DqnBuffer<wchar_t>, SoundData> ReadPlaylistFile(Context
 {
     DqnVHashTable<DqnBuffer<wchar_t>, SoundData> result = {};
 
-    auto mem_guard = context->tmp_allocator.TempRegionGuard();
+    auto mem_guard = global_func_local_allocator_.TempRegionGuard();
     usize buf_size = 0;
-    u8 *buf        = DqnFile_ReadAll(file, &buf_size, &context->tmp_allocator);
+    u8 *buf        = DqnFile_ReadAll(file, &buf_size, &global_func_local_allocator_);
     if (!buf)
     {
-        DQN_LOGGER_W(&context->logger, "DqnFile_ReadAll: Failed, could not read file: %s\n", WCharToUTF8(&context->tmp_allocator, file));
+        DQN_LOGGER_W(&context->logger, "DqnFile_ReadAll: Failed, could not read file: %s\n", WCharToUTF8(&global_func_local_allocator_, file));
         return result;
     }
 
@@ -671,10 +670,9 @@ DqnBuffer<wchar_t> AllocateSwprintf(DqnMemStack *allocator, char const *fmt, ...
 {
     va_list va;
     va_start(va, fmt);
-    DqnBuffer<char> result_utf8 = {};
-    result_utf8.len             = Dqn_vsnprintf(nullptr, 0, fmt, va) + 1;
-    result_utf8.str             = DQN_MEMSTACK_PUSH_TAIL_ARRAY(allocator, char, result_utf8.len);
-    Dqn_vsnprintf(result_utf8.str, result_utf8.len, fmt, va);
+    allocator->SetDefaultAllocate(DqnMemStack::PushType::Tail);
+    DqnBuffer<char> result_utf8 = AllocateSprintf(allocator, fmt, va);
+    allocator->SetDefaultAllocate(DqnMemStack::PushType::Head);
     va_end(va);
 
     DqnBuffer<wchar_t> result = {};
@@ -689,12 +687,15 @@ void CheckAllocatorHasZeroAllocations(DqnMemStack const *allocator)
     DQN_ASSERTM(allocator->block->Usage() == 0, "Allocator has non-zero memory usage: %zu\n", allocator->block->Usage());
 }
 
+struct RingAllocator
+{
+};
+
 int main(int, char)
 {
     Context context       = {};
-    context.allocator     = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroClear::Yes, DqnMemStack::Flag::All);
-    context.tmp_allocator = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroClear::Yes, DqnMemStack::Flag::All);
-    global_tmp_allocator  = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroClear::Yes, DqnMemStack::Flag::All);
+    context.allocator     = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroClear::Yes, DqnMemStack::Flag::DefaultFlags);
+    global_func_local_allocator_  = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroClear::Yes, DqnMemStack::Flag::DefaultFlags);
 
 #if 0
     HRESULT hresult = 0;
@@ -750,13 +751,13 @@ int main(int, char)
 
     for (DqnVHashTable<DqnBuffer<wchar_t>, SoundData>::Entry const &sound_file : playlist)
     {
-        CheckAllocatorHasZeroAllocations(&global_tmp_allocator);
+        CheckAllocatorHasZeroAllocations(&global_func_local_allocator_);
         AVFormatContext *fmt_context = nullptr;
-        auto mem_guard               = global_tmp_allocator.TempRegionGuard();
+        auto mem_guard               = global_func_local_allocator_.TempRegionGuard();
 
         DqnBuffer<wchar_t> const sound_path = sound_file.key;
         DqnBuffer<char> sound_path_utf8     = {};
-        sound_path_utf8.str                 = WCharToUTF8(&global_tmp_allocator, sound_path.str);
+        sound_path_utf8.str                 = WCharToUTF8(&global_func_local_allocator_, sound_path.str);
         if (avformat_open_input(&fmt_context, sound_path_utf8.str, nullptr, nullptr))
         {
             DQN_LOGGER_E(&context.logger, "avformat_open_input: failed to open file: %s", sound_path_utf8.str);
@@ -829,19 +830,19 @@ int main(int, char)
 
     for (SoundData const &sound_data : sounds)
     {
-        CheckAllocatorHasZeroAllocations(&global_tmp_allocator);
-        auto mem_guard = context.tmp_allocator.TempRegionGuard();
+        CheckAllocatorHasZeroAllocations(&global_func_local_allocator_);
+        auto mem_guard = context.allocator.TempRegionGuard();
         wchar_t const *artist = (sound_data.metadata.artist) ? sound_data.metadata.artist.str : L"_";
         wchar_t const *album  = (sound_data.metadata.album) ? sound_data.metadata.album.str : L"_";
         wchar_t const *title  = (sound_data.metadata.title) ? sound_data.metadata.title.str : sound_data.file_name.str;
 
         DqnBuffer<wchar_t> dest_folder_path =
-            AllocateSwprintf(&context.tmp_allocator,
+            AllocateSwprintf(&context.allocator,
                              "%s\\%s\\%s\\%s",
                              context.exe_directory.str,
-                             WCharToUTF8(&context.tmp_allocator, artist),
-                             WCharToUTF8(&context.tmp_allocator, album),
-                             WCharToUTF8(&context.tmp_allocator, title));
+                             WCharToUTF8(&context.allocator, artist),
+                             WCharToUTF8(&context.allocator, album),
+                             WCharToUTF8(&context.allocator, title));
         int break_ehre = 5;
     }
 
