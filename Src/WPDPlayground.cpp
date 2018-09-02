@@ -24,8 +24,8 @@ struct Context
     DqnLogger   logger;
     DqnMemStack allocator;
 
-    DqnBuffer<char> exe_name;
-    DqnBuffer<char> exe_directory;
+    DqnBuffer<wchar_t> exe_name;
+    DqnBuffer<wchar_t> exe_directory;
 };
 
 struct SelectedDevice
@@ -67,7 +67,7 @@ DqnBuffer<char> CopyStringToBuffer(DqnMemStack *allocator, char const *str_to_co
     return result;
 }
 
-void DqnWin32_GetExeNameAndDirectory(DqnMemStack *allocator, DqnBuffer<char> *exe_name, DqnBuffer<char> *exe_directory)
+void DqnWin32_GetExeNameAndDirectory(DqnMemStack *allocator, DqnBuffer<wchar_t> *exe_name, DqnBuffer<wchar_t> *exe_directory)
 {
     if (!exe_name && !exe_directory) return;
 
@@ -76,7 +76,7 @@ void DqnWin32_GetExeNameAndDirectory(DqnMemStack *allocator, DqnBuffer<char> *ex
 
     i32 offset_to_last_backslash = -1;
     int exe_buf_len              = 512;
-    char *exe_buf                = nullptr;
+    wchar_t *exe_buf                = nullptr;
     while(offset_to_last_backslash == -1)
     {
         if (exe_buf)
@@ -84,15 +84,15 @@ void DqnWin32_GetExeNameAndDirectory(DqnMemStack *allocator, DqnBuffer<char> *ex
             exe_buf_len += 128;
         }
 
-        exe_buf = (char *)allocator->Push(exe_buf_len * sizeof(char), DqnMemStack::PushType::Tail);
-        offset_to_last_backslash = DqnWin32_GetEXEDirectory(exe_buf, exe_buf_len);
+        exe_buf = (decltype(exe_buf))allocator->Push(exe_buf_len * sizeof(*exe_buf), DqnMemStack::PushType::Tail);
+        offset_to_last_backslash = DqnWin32_GetExeDirectory(exe_buf, exe_buf_len);
     }
 
     if (exe_name)
-        *exe_name = CopyStringToBuffer(allocator, exe_buf, offset_to_last_backslash + 1);
+        *exe_name = CopyWStringToBuffer(allocator, exe_buf, offset_to_last_backslash + 1);
 
     if (exe_directory)
-        *exe_directory = CopyStringToBuffer(allocator, exe_buf, offset_to_last_backslash);
+        *exe_directory = CopyWStringToBuffer(allocator, exe_buf, offset_to_last_backslash);
 }
 
 char *WCharToUTF8(DqnMemStack *allocator, WCHAR const *wstr, int *result_len = nullptr)
@@ -316,17 +316,7 @@ void WPDMakeFileTreeRecursively(Context *context, WPDReadSettings *read_settings
             WCHAR *object_name = nullptr;
             if (SUCCEEDED(hresult = object_values->GetStringValue(WPD_OBJECT_NAME, &object_name)))
             {
-                DQN_DEFER(CoTaskMemFree(object_name));
-#if 0
-                for (isize depth_index = 1; depth_index < (depth - 1); depth_index++)
-                    wprintf(L"    ");
-
-                if (depth >= 1)
-                    wprintf(L"|--");
-
-                wprintf(L"%s\n", object_name);
-#endif
-
+                DQN_DEFER { CoTaskMemFree(object_name); };
                 file_node->name = CopyWStringToBuffer(&context->allocator, object_name);
             }
             else
@@ -547,22 +537,22 @@ struct SoundMetadata
     DqnBuffer<wchar_t> tracktotal;
 };
 
-struct SoundData
+struct SoundFile
 {
-    DqnBuffer<wchar_t> file_path;
-    DqnSlice <wchar_t> file_name;
-    DqnSlice <wchar_t> file_extension; // Slice into file_path
+    DqnBuffer<wchar_t> path;
+    DqnSlice <wchar_t> name;
+    DqnSlice <wchar_t> extension; // Slice into file_path
     SoundMetadata      metadata;
 };
 
-struct SoundDataToDisk
+struct SoundFileToDisk
 {
     DqnBuffer<wchar_t> dest_file_path;
 };
 
-FILE_SCOPE DqnVHashTable<DqnBuffer<wchar_t>, SoundData> ReadPlaylistFile(Context *context, wchar_t const *file)
+FILE_SCOPE DqnVHashTable<DqnBuffer<wchar_t>, SoundFile> ReadPlaylistFile(Context *context, wchar_t const *file)
 {
-    DqnVHashTable<DqnBuffer<wchar_t>, SoundData> result = {};
+    DqnVHashTable<DqnBuffer<wchar_t>, SoundFile> result = {};
 
     auto mem_guard = global_func_local_allocator_.TempRegionGuard();
     usize buf_size = 0;
@@ -581,7 +571,7 @@ FILE_SCOPE DqnVHashTable<DqnBuffer<wchar_t>, SoundData> ReadPlaylistFile(Context
 
     DqnVArray<char *> missing_files = {};
     missing_files.LazyInit(DQN_MEGABYTE(1)/sizeof(missing_files.data[0]));
-    DQN_DEFER(missing_files.Free());
+    DQN_DEFER { missing_files.Free(); };
 
     while (char *line = Dqn_EatLine(&buf_ptr, nullptr/*line_len*/))
     {
@@ -600,7 +590,7 @@ FILE_SCOPE DqnVHashTable<DqnBuffer<wchar_t>, SoundData> ReadPlaylistFile(Context
         }
     }
 
-    for (DqnVHashTable<DqnBuffer<wchar_t>, SoundData>::Entry const &entry : result)
+    for (DqnVHashTable<DqnBuffer<wchar_t>, SoundFile>::Entry const &entry : result)
         fwprintf(stdout, L"parsed line: %s\n", entry.key.str);
 
     for (char const *missing_file : missing_files)
@@ -647,37 +637,15 @@ FILE_SCOPE bool ExtractSoundMetadata(DqnMemStack *allocator, AVDictionary const 
     return atleast_one_entry_filled;
 }
 
-DqnBuffer<char> AllocateSprintf(DqnMemStack *allocator, char const *fmt, va_list const va)
-{
-    DqnBuffer<char> result = {};
-    result.len = Dqn_vsnprintf(nullptr, 0, fmt, va) + 1;
-    result.str = DQN_MEMSTACK_PUSH_ARRAY(allocator, char, result.len);
-    Dqn_vsnprintf(result.str, result.len, fmt, va);
-    return result;
-}
-
-DqnBuffer<char> AllocateSprintf(DqnMemStack *allocator, char const *fmt, ...)
-{
-    DqnBuffer<char> result = {};
-    va_list va;
-    va_start(va, fmt);
-    AllocateSprintf(allocator, fmt, va);
-    va_end(va);
-    return result;
-}
-
-DqnBuffer<wchar_t> AllocateSwprintf(DqnMemStack *allocator, char const *fmt, ...)
+DqnBuffer<wchar_t> AllocateSwprintf(DqnMemStack *allocator, wchar_t const *fmt, ...)
 {
     va_list va;
     va_start(va, fmt);
-    allocator->SetDefaultAllocate(DqnMemStack::PushType::Tail);
-    DqnBuffer<char> result_utf8 = AllocateSprintf(allocator, fmt, va);
-    allocator->SetDefaultAllocate(DqnMemStack::PushType::Head);
-    va_end(va);
-
     DqnBuffer<wchar_t> result = {};
-    result.str                = UTF8ToWChar(allocator, result_utf8.str, &result.len);
-    allocator->Pop(result_utf8.str);
+    result.len                = vswprintf(nullptr, 0, fmt, va) + 1;
+    result.str                = DQN_MEMSTACK_PUSH_ARRAY(allocator, wchar_t, result.len);
+    vswprintf(result.str, result.len, fmt, va);
+    va_end(va);
     return result;
 }
 
@@ -687,15 +655,11 @@ void CheckAllocatorHasZeroAllocations(DqnMemStack const *allocator)
     DQN_ASSERTM(allocator->block->Usage() == 0, "Allocator has non-zero memory usage: %zu\n", allocator->block->Usage());
 }
 
-struct RingAllocator
-{
-};
-
 int main(int, char)
 {
-    Context context       = {};
-    context.allocator     = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroClear::Yes, DqnMemStack::Flag::DefaultFlags);
-    global_func_local_allocator_  = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroClear::Yes, DqnMemStack::Flag::DefaultFlags);
+    Context context              = {};
+    context.allocator            = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroMem::Yes, DqnMemStack::Flag::DefaultFlags);
+    global_func_local_allocator_ = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroMem::Yes, DqnMemStack::Flag::DefaultFlags);
 
 #if 0
     HRESULT hresult = 0;
@@ -717,7 +681,7 @@ int main(int, char)
     void *file_tree_allocator_mem      = DqnOS_VAlloc(file_tree_allocator_mem_size);
 
     Context file_tree_context   = {};
-    file_tree_context.allocator = DqnMemStack(file_tree_allocator_mem, file_tree_allocator_mem_size, Dqn::ZeroClear::No, DqnMemStack::Flag::All);
+    file_tree_context.allocator = DqnMemStack(file_tree_allocator_mem, file_tree_allocator_mem_size, Dqn::ZeroMem::No, DqnMemStack::Flag::All);
     file_tree_context.logger    = context.logger;
     FileNode root           = {};
     {
@@ -745,17 +709,17 @@ int main(int, char)
 
 #endif
 
-    DqnVHashTable<DqnBuffer<wchar_t>, SoundData> playlist = ReadPlaylistFile(&context, L"Data/test.m3u8");
-    auto sounds = DqnVArray<SoundData>(playlist.num_used_buckets);
-    DQN_DEFER(playlist.Free());
+    DqnVHashTable<DqnBuffer<wchar_t>, SoundFile> playlist = ReadPlaylistFile(&context, L"Data/test.m3u8");
+    auto sounds = DqnVArray<SoundFile>(playlist.num_used_buckets);
+    DQN_DEFER { playlist.Free(); };
 
-    for (DqnVHashTable<DqnBuffer<wchar_t>, SoundData>::Entry const &sound_file : playlist)
+    for (DqnVHashTable<DqnBuffer<wchar_t>, SoundFile>::Entry const &entry : playlist)
     {
         CheckAllocatorHasZeroAllocations(&global_func_local_allocator_);
         AVFormatContext *fmt_context = nullptr;
         auto mem_guard               = global_func_local_allocator_.TempRegionGuard();
 
-        DqnBuffer<wchar_t> const sound_path = sound_file.key;
+        DqnBuffer<wchar_t> const sound_path = entry.key;
         DqnBuffer<char> sound_path_utf8     = {};
         sound_path_utf8.str                 = WCharToUTF8(&global_func_local_allocator_, sound_path.str);
         if (avformat_open_input(&fmt_context, sound_path_utf8.str, nullptr, nullptr))
@@ -763,7 +727,7 @@ int main(int, char)
             DQN_LOGGER_E(&context.logger, "avformat_open_input: failed to open file: %s", sound_path_utf8.str);
             continue;
         }
-        DQN_DEFER(avformat_close_input(&fmt_context));
+        DQN_DEFER { avformat_close_input(&fmt_context); };
 
         // TODO(doyle): Verify what this does
         if (avformat_find_stream_info(fmt_context, nullptr) < 0)
@@ -773,54 +737,54 @@ int main(int, char)
         }
 
 #if 1
-        SoundData sound_data = {};
-        sound_data.file_path = CopyWStringToBuffer(&context.allocator, sound_file.key.str, sound_file.key.len);
-        for (isize i = sound_data.file_path.len; i >= 0; --i)
+        SoundFile sound_file = {};
+        sound_file.path = CopyWStringToBuffer(&context.allocator, entry.key.str, entry.key.len);
+        for (isize i = sound_file.path.len; i >= 0; --i)
         {
-            if (sound_data.file_path.str[i] == '.')
+            if (sound_file.path.str[i] == '.')
             {
-                sound_data.file_extension.str = sound_path.str + (i + 1);
-                sound_data.file_extension.len = static_cast<int>(sound_path.len - i);
+                sound_file.extension.str = sound_file.path.str + (i + 1);
+                sound_file.extension.len = static_cast<int>(sound_file.path.len - i);
                 break;
             }
         }
 
-        if (!sound_data.file_path)
+        if (!sound_file.path)
         {
             DQN_LOGGER_E(&context.logger, "Could not figure out the file extension for file path: %s", sound_path_utf8.str);
             continue;
         }
 
-        for (isize i = sound_data.file_extension.len; i >= 0; --i)
+        for (isize i = sound_file.extension.len; i >= 0; --i)
         {
-            if (sound_data.file_extension.str[i] == '\\')
+            if (sound_file.path.str[i] == '\\')
             {
-                sound_data.file_name.str = sound_path.str + (i + 1);
-                sound_data.file_name.len = static_cast<int>(sound_path.len - i);
+                sound_file.name.str = sound_file.path.str + (i + 1);
+                sound_file.name.len = static_cast<int>(sound_file.path.len - i);
                 break;
             }
         }
 
-        if (!sound_data.file_extension)
+        if (!sound_file.name)
         {
             DQN_LOGGER_E(&context.logger, "Could not figure out the file name for file path: %s", sound_path_utf8.str);
             continue;
         }
 
-        bool atleast_one_entry_filled = ExtractSoundMetadata(&context.allocator, fmt_context->metadata, &sound_data.metadata);
+        bool atleast_one_entry_filled = ExtractSoundMetadata(&context.allocator, fmt_context->metadata, &sound_file.metadata);
         DQN_FOR_EACH(i, fmt_context->nb_streams)
         {
             AVStream const *stream = fmt_context->streams[i];
-            atleast_one_entry_filled |= ExtractSoundMetadata(&context.allocator, stream->metadata, &sound_data.metadata);
+            atleast_one_entry_filled |= ExtractSoundMetadata(&context.allocator, stream->metadata, &sound_file.metadata);
         }
 
         if (!atleast_one_entry_filled)
         {
-            DQN_LOGGER_W(&context.logger, "No metadata could be parsed for file: %s", sound_file.key.str);
+            DQN_LOGGER_W(&context.logger, "No metadata could be parsed for file: %s", entry.key.str);
             continue;
         }
 
-        sounds.Push(sound_data);
+        sounds.Push(sound_file);
 #else
         av_dump_format(fmt_context, 0, sound_file_path.str, 0);
 #endif
@@ -828,22 +792,19 @@ int main(int, char)
 
     DqnWin32_GetExeNameAndDirectory(&context.allocator, &context.exe_name, &context.exe_directory);
 
-    for (SoundData const &sound_data : sounds)
+    for (SoundFile const &sound_file : sounds)
     {
         CheckAllocatorHasZeroAllocations(&global_func_local_allocator_);
         auto mem_guard = context.allocator.TempRegionGuard();
-        wchar_t const *artist = (sound_data.metadata.artist) ? sound_data.metadata.artist.str : L"_";
-        wchar_t const *album  = (sound_data.metadata.album) ? sound_data.metadata.album.str : L"_";
-        wchar_t const *title  = (sound_data.metadata.title) ? sound_data.metadata.title.str : sound_data.file_name.str;
+        wchar_t const *artist = (sound_file.metadata.artist) ? sound_file.metadata.artist.str : L"_";
+        wchar_t const *album  = (sound_file.metadata.album)  ? sound_file.metadata.album.str : L"_";
+        wchar_t const *title  = (sound_file.metadata.title)  ? sound_file.metadata.title.str : sound_file.name.str;
 
-        DqnBuffer<wchar_t> dest_folder_path =
-            AllocateSwprintf(&context.allocator,
-                             "%s\\%s\\%s\\%s",
-                             context.exe_directory.str,
-                             WCharToUTF8(&context.allocator, artist),
-                             WCharToUTF8(&context.allocator, album),
-                             WCharToUTF8(&context.allocator, title));
+        DqnBuffer<wchar_t> dest_folder_path = AllocateSwprintf(
+            &context.allocator, L"%s\\Files\\%s\\%s\\%s.%s", context.exe_directory.str, artist, album, title, sound_file.extension.str);
         int break_ehre = 5;
+
+        DQN_LOGGER_D(&context.logger, "%s", WCharToUTF8(&context.allocator, dest_folder_path.str));
     }
 
     return 0;
