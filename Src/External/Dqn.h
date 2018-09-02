@@ -1276,17 +1276,16 @@ struct DqnArray
     isize                       max;
     T                          *data;
 
-     DqnArray        () = default;
-     DqnArray        (DqnAllocator *allocator)                   { *this = {}; this->allocator = allocator; }
-    // ~DqnArray     ()                                          { if (this->data && this->mem_api) this->mem_api->Free(data); }
+    DqnArray         () = default;
+    DqnArray         (DqnAllocator *allocator)                    { *this = {}; this->allocator = allocator; }
+    DqnArray         (T *data_, isize max_, isize len_ = 0)       { *this = {}; this->allocator = nullptr; this->data = data_; this->max = max_; this->len = len_; }
 
-    void  UseMemory  (T *data_, isize max_, isize len_ = 0)      { this->mem_api = nullptr; this->data = data_; this->max = max_; this->len = len_; }
-    void  Clear      (Dqn::ZeroMem clear = Dqn::ZeroMem::No) { if (!data) return; len = 0; if (clear == Dqn::ZeroMem::Yes) DqnMem_Clear(data, 0, sizeof(T) * max); }
-    void  Free       ()                                          { if (data) { allocator->Free(data); } *this = {}; }
-    T    *Front      ()                                          { DQN_ASSERT(len > 0); return data + 0; }
-    T    *Back       ()                                          { DQN_ASSERT(len > 0); return data + (len - 1); }
-    void  Resize     (isize new_len)                             { if (new_len > max) Reserve(GrowCapacity_(new_len)); len = new_len; }
-    void  Resize     (isize new_len, T const *v)                 { if (new_len > max) Reserve(GrowCapacity_(new_len)); if (new_len > len) for (isize n = len; n < new_len; n++) data[n] = *v; len = new_len; }
+    void  Clear      (Dqn::ZeroMem clear = Dqn::ZeroMem::No)      { if (!data) return; len = 0; if (clear == Dqn::ZeroMem::Yes) DqnMem_Clear(data, 0, sizeof(T) * max); }
+    void  Free       ()                                           { if (data) { allocator->Free(data); } *this = {}; }
+    T    *Front      ()                                           { DQN_ASSERT(len > 0); return data + 0; }
+    T    *Back       ()                                           { DQN_ASSERT(len > 0); return data + (len - 1); }
+    void  Resize     (isize new_len)                              { if (new_len > max) Reserve(GrowCapacity_(new_len)); len = new_len; }
+    void  Resize     (isize new_len, T const *v)                  { if (new_len > max) Reserve(GrowCapacity_(new_len)); if (new_len > len) for (isize n = len; n < new_len; n++) data[n] = *v; len = new_len; }
     void  Reserve    (isize new_max);
     T    *Make       (isize len = 1)                              { len += len; if (len > max) Reserve(GrowCapacity_(len)); return &data[len - len]; }
     T    *Push       (T const &v)                                 { if (len + 1 > max) Reserve(GrowCapacity_(len + 1)); data[len++] = v; return data + (len-1); }
@@ -1459,7 +1458,7 @@ struct DqnMemStack
     DqnAllocator  *block_allocator; // Read: Allocator used to allocator blocks for this memory stack
     Block         *block;           // Read: Memory block allocated for the stack
     u32            flags;           // Read
-    i32            tmp_region_count;// Read: The number of temp memory regions in use
+    i32            mem_region_count;// Read: The number of temp memory regions in use
 
     DqnMemStack() = default;
 
@@ -1476,69 +1475,39 @@ struct DqnMemStack
 
     // Allocate memory from the MemStack.
     // alignment: Ptr returned from allocator is aligned to this value and MUST be power of 2.
-    // return:    nullptr if out of space OR stack is using fixed memory/size OR stack full and platform malloc fails.
+    // return:    nullptr if out of space OR stack is using fixed memory/size and out of memory OR stack full and malloc fails (or flags prevent expansion).
     void *Push              (isize size, PushType push_type = PushType::Default, u8 alignment = 4);
-    void  SetDefaultAllocate(PushType type)                                                         { if (type == PushType::Default) return; if (type == PushType::Head) flags |= Flag::DefaultAllocateTail; else flags &= ~Flag::DefaultAllocateTail; }
 
-    // Frees the given ptr. It MUST be the last allocated item in the stack, asserts otherwise.
-    void  Pop           (void *ptr, Dqn::ZeroMem clear = Dqn::ZeroMem::No);
-
-    // Frees all blocks belonging to this stack.
-    void  Free          ();
-
-    // Frees the specified block belonging to the stack.
-    // return: FALSE if block doesn't belong this into calls DqnMem_Free() or invalid args.
-    bool  FreeMemBlock  (Block *mem_block);
-
-    // Frees the last-most memory block. If last block, free that block making the MemStack blockless.
-    // Next allocate will attach a block.
-    bool  FreeLastBlock ();
-
-    // Reverts the stack and its usage back to the first block
-    void  Reset         ();
-    void  ResetTail     ();
-
-    // Reset the current memory block usage to 0.
-    void  ClearCurrBlock(Dqn::ZeroMem clear = Dqn::ZeroMem::No);
-    Info  GetInfo       ()                      const;
+    void  SetDefaultAllocate(PushType type)                                    { if (type == PushType::Default) return; if (type == PushType::Head) flags &= ~Flag::DefaultAllocateTail; else flags |= Flag::DefaultAllocateTail; }
+    void  Pop               (void *ptr, Dqn::ZeroMem zero = Dqn::ZeroMem::No); // Free the ptr. MUST be the last allocated ptr on the block head or tail, assert otherwise.
+    void  PopBlock          ()                                                 { FreeBlock(block); }
+    void  Free              ()                                                 { if (flags & Flag::BoundsGuard) tracker.allocations.Free(); while (block_allocator && block) PopBlock(); }
+    bool  FreeBlock         (DqnMemStack::Block *mem_block);
+    void  Reset             (Dqn::ZeroMem zero)                                { while(block && block->prev_block) PopBlock(); ClearCurrBlock(zero); }
+    void  ResetTail         ();                                                // Reset just the tail
+    void  ClearCurrBlock    (Dqn::ZeroMem zero = Dqn::ZeroMem::No);            // Reset the current memory block usage to 0.
+    Info  GetInfo           ()                                                 const;
 
     // Temporary Memory Regions API
     // =============================================================================================
-    // TODO(doyle): Look into a way of "preventing/guarding" against anual calls to free/clear in temp regions
-    struct TempRegion
+    // Revert all allocations between the Begin() and End() regions. Guard version is RAII'ed.
+    enum struct RegionIsScoped { Yes, No };
+    struct MemRegion
     {
-        DqnMemStack *stack;             // Stack associated with this TempRegion
-        Block       *starting_block;     // Remember the block to revert to and its memory usage.
+        ~MemRegion() { if (destruct_on_scope_exit) stack->MemRegionEnd(*this); }
+        DqnMemStack *stack;               // Stack associated with this MemRegion
+        Block       *starting_block;      // The block to revert back to
         char        *starting_block_head;
         char        *starting_block_tail;
-        bool         keep_head_changes = false;
-        bool         keep_tail_changes = false;
+        bool         destruct_on_scope_exit;
     };
 
-    struct TempRegionGuard_
-    {
-         TempRegionGuard_(DqnMemStack *stack);
-        ~TempRegionGuard_();
-        TempRegion region;
-    };
-
-    // Revert all allocations between the Begin() and End() regions. Guard version is RAII'ed.
-    TempRegion       TempRegionBegin      ();
-    void             TempRegionEnd        (TempRegion region);
-    TempRegionGuard_ TempRegionGuard      ();
-
+    MemRegion       MemRegionBegin (bool is_scoped = false);
+    MemRegion       MemRegionScoped()                  { return MemRegionBegin(/*is_scoped*/ true); };
+    void            MemRegionEnd   (MemRegion region);
     // Keep allocations that have occurred since Begin(). End() does not need to be called anymore.
-    void             TempRegionKeepChanges(TempRegion region);
+    void            MemRegionSave  (MemRegion *region) { DQN_ASSERT(region->stack == this); region->destruct_on_scope_exit = false; mem_region_count--; DQN_ASSERT(mem_region_count >= 0); }
 
-    void *MallocHead (size_t size)              { return Push(size); }
-    void *CallocHead (size_t size)              { void *result = Push(size); DqnMem_Clear(result, 0, size); }
-    void  FreeHead   (void   *ptr)              { (void)ptr; return; }
-    void *ReallocHead(void   *ptr, size_t size) { DqnPtrHeader *header = tracker.PtrToHeader((char *)ptr); void *result = Push(size); DqnMem_Copy(result, ptr, header->alloc_amount); return result; }
-
-    void *MallocTail (size_t size)              { return Push(size, PushType::Tail); }
-    void *CallocTail (size_t size)              { void *result = Push(size, PushType::Tail); DqnMem_Clear(result, 0, size); }
-    void  FreeTail   (void   *ptr)              { (void)ptr; return; }
-    void *ReallocTail(void   *ptr, size_t size) { DqnPtrHeader *header = tracker.PtrToHeader((char *)ptr); void *result = Push(size, PushType::Tail); DqnMem_Copy(result, ptr, header->alloc_amount); return result; }
 };
 
 // #DqnHash API
@@ -2182,8 +2151,8 @@ struct DqnVHashTable
         Entry    &operator* ()                      const { return *GetCurrEntry(); }
         Iterator &operator++();
         Iterator &operator--()                            { if (--index_in_bucket < 0) { index_in_bucket = 0; num_used_buckets = DQN_MAX(--num_used_buckets, 0); } entry = GetCurrEntry(); return *this; }
-        Iterator  operator++(int)                         { Iterator result = *this; ++(*this); return result; }
-        Iterator  operator--(int)                         { Iterator result = *this; --(*this); return result; }
+        Iterator  operator++(int)                         { Iterator result = *this; ++(*this); return result; } // postfix
+        Iterator  operator--(int)                         { Iterator result = *this; --(*this); return result; } // postfix
         Iterator  operator+ (int offset)            const { Iterator result = *this; DQN_FOR_EACH(i, DQN_ABS(offset)) { (offset > 0) ? ++result : --result; } return result; } // TODO(doyle): Improve
         Iterator  operator- (int offset)            const { Iterator result = *this; DQN_FOR_EACH(i, DQN_ABS(offset)) { (offset > 0) ? --result : ++result; } return result; } // TODO(doyle): Improve
 
@@ -2193,10 +2162,8 @@ struct DqnVHashTable
         isize          index_in_bucket;
     };
 
-    Iterator   Begin() { return begin(); }
-    Iterator   End()   { return end(); }
-    Iterator   begin() { return Iterator(this); }
-    Iterator   end()   { return Iterator(this, num_buckets, DQN_ARRAY_COUNT(this->buckets[0].entries)); }
+    Iterator            begin()       { return Iterator(this); }
+    Iterator            end()         { return Iterator(this, num_buckets, DQN_ARRAY_COUNT(this->buckets[0].entries)); }
 };
 
 DQN_VHASH_TABLE_TEMPLATE DQN_VHASH_TABLE_DECL::Iterator::Iterator(DqnVHashTable *table_,
@@ -2367,6 +2334,7 @@ struct DqnFile
     u32    flags;
     void  *handle;
     usize  size;
+    int    curr_write_offset;
 
     // API
     // ==============================================================================================
@@ -2378,9 +2346,9 @@ struct DqnFile
     bool   Open(char    const *path, u32 const flags_, Action const action);
     bool   Open(wchar_t const *path, u32 const flags_, Action const action);
 
-    // fileOffset: The byte offset to starting writing from.
+    // file_offset: The byte offset to starting writing from.
     // return:     The number of bytes written. 0 if invalid args or it failed to write.
-    usize  Write(u8 const *buf, usize const num_bytes_to_write, usize const fileOffset);
+    usize  Write(u8 const *buf, usize const num_bytes_to_write);
 
     // IMPORTANT: You may want to allocate size+1 for null-terminating the file contents when reading into a buffer.
     // return: The number of bytes read. 0 if invalid args or it failed to read.
@@ -3152,22 +3120,11 @@ void DqnMemStack::Pop(void *ptr, Dqn::ZeroMem clear)
     if (this->block->tail == block_end && this->block->head == this->block->memory)
     {
         if (this->block->prev_block)
-        {
-            this->FreeLastBlock();
-        }
+            this->PopBlock();
     }
 }
 
-void DqnMemStack::Free()
-{
-    if (Dqn_BitIsSet(this->flags, Flag::BoundsGuard))
-        this->tracker.allocations.Free();
-
-    while (this->block_allocator && this->block)
-        this->FreeLastBlock();
-}
-
-bool DqnMemStack::FreeMemBlock(DqnMemStack::Block *mem_block)
+bool DqnMemStack::FreeBlock(DqnMemStack::Block *mem_block)
 {
     if (!mem_block || !this->block)
         return false;
@@ -3192,7 +3149,7 @@ bool DqnMemStack::FreeMemBlock(DqnMemStack::Block *mem_block)
         this->block_allocator->Free(block_to_free);
 
         // No more blocks, then last block has been freed
-        if (!this->block) DQN_ASSERT(this->tmp_region_count == 0);
+        if (!this->block) DQN_ASSERT(this->mem_region_count == 0);
         return true;
     }
 
@@ -3211,38 +3168,19 @@ void DqnMemStack::ResetTail()
     this->block->tail = end;
 }
 
-void DqnMemStack::Reset()
-{
-    while(this->block && this->block->prev_block)
-    {
-        this->FreeLastBlock();
-    }
-    this->ClearCurrBlock(Dqn::ZeroMem::No);
-}
-
-
-bool DqnMemStack::FreeLastBlock()
-{
-    bool result = this->FreeMemBlock(this->block);
-    return result;
-}
-
-void DqnMemStack::ClearCurrBlock(Dqn::ZeroMem clear)
+void DqnMemStack::ClearCurrBlock(Dqn::ZeroMem zero)
 {
     if (this->block)
     {
         if (Dqn_BitIsSet(this->flags, Flag::BoundsGuard))
-        {
             DqnMemStack__KillTrackedPtrsInBlock(&this->tracker, this->block);
-        }
 
         this->block->head = this->block->memory;
         this->block->tail = this->block->memory + this->block->size;
-        if (clear == Dqn::ZeroMem::Yes)
+        if (zero == Dqn::ZeroMem::Yes)
         {
             DqnMem_Clear(this->block->memory, 0, this->block->size);
         }
-
     }
 }
 
@@ -3269,116 +3207,44 @@ DqnMemStack::Info DqnMemStack::GetInfo() const
     return result;
 }
 
-DqnMemStack::TempRegion DqnMemStack::TempRegionBegin()
+DqnMemStack::MemRegion DqnMemStack::MemRegionBegin(bool is_scoped)
 {
-    TempRegion result        = {};
-    result.stack             = this;
-    result.starting_block     = this->block;
-    result.starting_block_head = (this->block) ? this->block->head : nullptr;
-    result.starting_block_tail = (this->block) ? this->block->tail : nullptr;
+    MemRegion result = {};
+    result.stack     = this;
+    if (this->block)
+    {
+        result.starting_block      = this->block;
+        result.starting_block_head = this->block->head;
+        result.starting_block_tail = this->block->tail;
+    }
 
-    this->tmp_region_count++;
+    result.destruct_on_scope_exit = is_scoped;
+    this->mem_region_count++;
     return result;
 }
 
-void DqnMemStack::TempRegionEnd(TempRegion region)
+void DqnMemStack::MemRegionEnd(MemRegion region)
 {
     DQN_ASSERT(region.stack == this);
 
-    this->tmp_region_count--;
-    DQN_ASSERT(this->tmp_region_count >= 0);
+    this->mem_region_count--;
+    DQN_ASSERT(this->mem_region_count >= 0);
 
-    if (region.keep_head_changes && region.keep_tail_changes)
-    {
-        return;
-    }
+    while (this->block != region.starting_block)
+        this->PopBlock();
 
-    // Free blocks until you find the first block with changes in the head or tail, this is the
-    // block we want to start preserving allocation data for keepHead/TailChanges.
-    if (region.keep_head_changes)
+    if (this->block)
     {
-        while (this->block && this->block->head == this->block->memory)
-            this->FreeLastBlock();
-    }
-    else if (region.keep_tail_changes)
-    {
-        while (this->block && this->block->tail == (this->block->memory + this->block->size))
-            this->FreeLastBlock();
-    }
-    else
-    {
-        while (this->block != region.starting_block)
-            this->FreeLastBlock();
-    }
+        this->block->head = region.starting_block_head;
+        this->block->tail = region.starting_block_tail;
 
-    for (Block *block_ = this->block; block_; block_ = block_->prev_block)
-    {
-        if (block_ == region.starting_block)
+        if (this->flags & DqnMemStack::Flag::BoundsGuard)
         {
-            if (region.keep_head_changes)
-            {
-                block_->tail = region.starting_block_tail;
-            }
-            else if (region.keep_tail_changes)
-            {
-                block_->head = region.starting_block_head;
-            }
-            else
-            {
-                block_->head = region.starting_block_head;
-                block_->tail = region.starting_block_tail;
-            }
-
-            if (Dqn_BitIsSet(this->flags, DqnMemStack::Flag::BoundsGuard))
-            {
-                char *block_start = this->block->head;
-                char *block_end   = this->block->tail;
-                DqnMemStack__KillTrackedPtrsInRange(&this->tracker, block_start, block_end);
-            }
-            break;
-        }
-        else
-        {
-            if (region.keep_head_changes || region.keep_tail_changes)
-            {
-                char *block_start = nullptr;
-                char *block_end   = nullptr;
-                if (region.keep_head_changes)
-                {
-                    block_start   = block_->tail;
-                    block_end     = block_->memory + block_->size;
-                    block_->tail = block_end;
-                }
-                else
-                {
-                    block_start   = block_->memory;
-                    block_end     = block_->memory + block_->size;
-                    block_->head = block_start;
-                }
-
-                if (Dqn_BitIsSet(this->flags, DqnMemStack::Flag::BoundsGuard))
-                {
-                    DqnMemStack__KillTrackedPtrsInRange(&this->tracker, block_start, block_end);
-                }
-            }
+            char *block_start = this->block->head;
+            char *block_end   = this->block->tail;
+            DqnMemStack__KillTrackedPtrsInRange(&this->tracker, block_start, block_end);
         }
     }
-}
-
-DqnMemStack::TempRegionGuard_ DqnMemStack::TempRegionGuard()
-{
-    return TempRegionGuard_(this);
-}
-
-DqnMemStack::TempRegionGuard_::TempRegionGuard_(DqnMemStack *stack)
-{
-    this->region = stack->TempRegionBegin();
-}
-
-DqnMemStack::TempRegionGuard_::~TempRegionGuard_()
-{
-    DqnMemStack *const stack = this->region.stack;
-    stack->TempRegionEnd(this->region);
 }
 
 // #DqnHash
@@ -7669,13 +7535,14 @@ bool DqnFile::Open(wchar_t const *path, u32 flags_, Action action)
 #endif
 }
 
-usize DqnFile::Write(u8 const *buf, usize num_bytes_to_write, usize fileOffset)
+usize DqnFile::Write(u8 const *buf, usize num_bytes_to_write)
 {
     // TODO(doyle): Implement when it's needed
-    DQN_ASSERTM(fileOffset == 0, "File writing into offset is not implemented.");
+    usize file_offset       = 0;
     usize num_bytes_written = 0;
 
 #if defined(DQN_IS_WIN32)
+    DQN_ALWAYS_ASSERTM(file_offset == 0, "File writing into offset is not implemented.");
     DWORD bytes_to_write = (DWORD)num_bytes_to_write;
     DWORD bytes_written;
     BOOL result = WriteFile(this->handle, (void *)buf, bytes_to_write, &bytes_written, nullptr);
@@ -7691,7 +7558,6 @@ usize DqnFile::Write(u8 const *buf, usize num_bytes_to_write, usize fileOffset)
     const usize ITEMS_TO_WRITE = 1;
     if (fwrite(buf, num_bytes_to_write, ITEMS_TO_WRITE, (FILE *)this->handle) == ITEMS_TO_WRITE)
     {
-        rewind((FILE *)this->handle);
         num_bytes_written = ITEMS_TO_WRITE * num_bytes_to_write;
     }
 #endif
@@ -7831,7 +7697,7 @@ DQN_FILE_SCOPE bool DqnFile_WriteAll(char const *path, u8 const *buf, usize cons
     }
 
     DQN_DEFER { file.Close(); };
-    usize bytes_written = file.Write(buf, buf_size, 0);
+    usize bytes_written = file.Write(buf, buf_size);
     if (bytes_written != buf_size)
     {
         DQN_LOGE("Bytes written did not match the buffer size, %zu != %zu", bytes_written, buf_size);
@@ -7851,7 +7717,7 @@ DQN_FILE_SCOPE bool DqnFile_WriteAll(wchar_t const *path, u8 const *buf, usize c
     }
 
     DQN_DEFER { file.Close(); };
-    usize bytes_written = file.Write(buf, buf_size, 0);
+    usize bytes_written = file.Write(buf, buf_size);
     if (bytes_written != buf_size)
     {
         DQN_LOGE("Bytes written did not match the buffer size, %zu != %zu", bytes_written, buf_size);
