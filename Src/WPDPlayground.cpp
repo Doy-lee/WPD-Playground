@@ -8,11 +8,14 @@
 #include <wrl/client.h> // ComPtr
 #include <stdio.h>
 
+#pragma warning(push)
+#pragma warning(disable: 4244) // 'return': conversion from 'int' to 'uint8_t', possible loss of data
 extern "C"
 {
 #include <libavformat/avformat.h>
 #include <libavutil/dict.h>
 }
+#pragma warning(pop)
 
 #define DQN_PLATFORM_HEADER
 #include "External/Dqn.h"
@@ -66,32 +69,6 @@ DqnBuffer<char> CopyStringToBuffer(DqnMemStack *allocator, char const *str_to_co
     return result;
 }
 
-void DqnWin32_GetExeNameAndDirectory(DqnMemStack *allocator, DqnBuffer<wchar_t> *exe_name, DqnBuffer<wchar_t> *exe_directory)
-{
-    if (!exe_name && !exe_directory) return;
-
-    i32 offset_to_last_backslash = -1;
-    int exe_buf_len              = 512;
-    wchar_t *exe_buf                = nullptr;
-    while(offset_to_last_backslash == -1)
-    {
-        if (exe_buf)
-        {
-            exe_buf_len += 128;
-        }
-
-        exe_buf = (decltype(exe_buf))allocator->Push(exe_buf_len * sizeof(*exe_buf), DqnMemStack::PushType::Tail);
-        DQN_DEFER { allocator->Pop(exe_buf); };
-        offset_to_last_backslash = DqnWin32_GetExeDirectory(exe_buf, exe_buf_len);
-    }
-
-    if (exe_name)
-        *exe_name = CopyWStringToBuffer(allocator, exe_buf, offset_to_last_backslash + 1);
-
-    if (exe_directory)
-        *exe_directory = CopyWStringToBuffer(allocator, exe_buf, offset_to_last_backslash);
-}
-
 char *WCharToUTF8(DqnMemStack *allocator, WCHAR const *wstr, int *result_len = nullptr)
 {
     int required_len   = DqnWin32_WCharToUTF8(wstr, nullptr, 0);
@@ -117,6 +94,8 @@ wchar_t *UTF8ToWChar(DqnMemStack *allocator, char const *str, int *result_len = 
 struct FileNode
 {
     DqnBuffer<wchar_t>  name;
+    DqnBuffer<wchar_t>  wpd_object_id;
+
     struct FileNode    *parent;
     struct FileNode    *child;
     int                 num_children;
@@ -261,35 +240,35 @@ ComPtr<IPortableDevice> OpenPortableDevice(Context *context, wchar_t const *devi
     return result;
 }
 
-struct WPDReadSettings
+struct WPDHandles
 {
     ComPtr<IPortableDeviceKeyCollection> properties_to_read;
     ComPtr<IPortableDeviceProperties>    device_properties;
     ComPtr<IPortableDeviceContent>       content;
 };
 
-FILE_SCOPE bool WPDMakeReadSettings(Context *context, IPortableDevice *portable_device, WPDReadSettings *settings)
+FILE_SCOPE bool WPDGetWPDHandles(Context *context, IPortableDevice *portable_device, WPDHandles *handles)
 {
     HRESULT hresult;
-    if (FAILED(hresult = portable_device->Content(&settings->content)))
+    if (FAILED(hresult = portable_device->Content(&handles->content)))
     {
         HANDLE_COM_ERROR(hresult, "IPortableDevice::Content", &context->logger);
         return false;
     }
 
-    if (FAILED(CoCreateInstance(CLSID_PortableDeviceKeyCollection, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&settings->properties_to_read))))
+    if (FAILED(CoCreateInstance(CLSID_PortableDeviceKeyCollection, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&handles->properties_to_read))))
     {
         HANDLE_COM_ERROR(hresult, "CoCreateInstance", &context->logger);
         return false;
     }
 
-    if (FAILED(settings->properties_to_read->Add(WPD_OBJECT_NAME)))
+    if (FAILED(handles->properties_to_read->Add(WPD_OBJECT_NAME)))
     {
         HANDLE_COM_ERROR(hresult, "IPortableDeviceKeyCollection::Add", &context->logger);
         return false;
     }
 
-    if (FAILED(settings->content->Properties(&settings->device_properties)))
+    if (FAILED(handles->content->Properties(&handles->device_properties)))
     {
         HANDLE_COM_ERROR(hresult, "IPortableDeviceContext::Properties", &context->logger);
         return false;
@@ -298,13 +277,13 @@ FILE_SCOPE bool WPDMakeReadSettings(Context *context, IPortableDevice *portable_
     return true;
 }
 
-void WPDMakeFileTreeRecursively(Context *context, WPDReadSettings *read_settings, WCHAR const *parent_object_id, FileNode *file_node, isize *enum_count, int depth = 0)
+void WPDMakeFileTreeRecursively(Context *context, WPDHandles *wpd_handles, WCHAR const *parent_object_id, FileNode *file_node, isize *enum_count, int depth = 0)
 {
     (*enum_count)++;
     // Get the file name of the object
     {
-        IPortableDeviceKeyCollection *properties_to_read = read_settings->properties_to_read.Get();
-        IPortableDeviceProperties *device_properties     = read_settings->device_properties.Get();
+        IPortableDeviceKeyCollection *properties_to_read = wpd_handles->properties_to_read.Get();
+        IPortableDeviceProperties *device_properties     = wpd_handles->device_properties.Get();
 
         HRESULT hresult = 0;
         ComPtr<IPortableDeviceValues> object_values = nullptr;
@@ -314,7 +293,8 @@ void WPDMakeFileTreeRecursively(Context *context, WPDReadSettings *read_settings
             if (SUCCEEDED(hresult = object_values->GetStringValue(WPD_OBJECT_NAME, &object_name)))
             {
                 DQN_DEFER { CoTaskMemFree(object_name); };
-                file_node->name = CopyWStringToBuffer(&context->allocator, object_name);
+                file_node->name          = CopyWStringToBuffer(&context->allocator, object_name);
+                file_node->wpd_object_id = CopyWStringToBuffer(&context->allocator, parent_object_id);
             }
             else
             {
@@ -330,7 +310,7 @@ void WPDMakeFileTreeRecursively(Context *context, WPDReadSettings *read_settings
     // Recursively iterate contents
     {
         HRESULT hresult = 0;
-        IPortableDeviceContent *content                 = read_settings->content.Get();
+        IPortableDeviceContent *content                 = wpd_handles->content.Get();
         ComPtr<IEnumPortableDeviceObjectIDs> object_ids = nullptr;
         if (FAILED(hresult = content->EnumObjects(0 /*dwFlags ignored*/, parent_object_id, nullptr /*pFilter ignored*/, &object_ids)))
         {
@@ -362,7 +342,7 @@ void WPDMakeFileTreeRecursively(Context *context, WPDReadSettings *read_settings
                         child->parent = file_node;
                     }
 
-                    WPDMakeFileTreeRecursively(context, read_settings, object_id_array[fetch_index], child, enum_count, depth + 1);
+                    WPDMakeFileTreeRecursively(context, wpd_handles, object_id_array[fetch_index], child, enum_count, depth + 1);
                     CoTaskMemFree(object_id_array[fetch_index]);
                 }
 
@@ -544,7 +524,7 @@ struct SoundFile
 
 FILE_SCOPE DqnVHashTable<DqnBuffer<wchar_t>, SoundFile> ReadPlaylistFile(Context *context, wchar_t const *file)
 {
-    DqnVHashTable<DqnBuffer<wchar_t>, SoundFile> result(DQN_MEGABYTE(16));
+    DqnVHashTable<DqnBuffer<wchar_t>, SoundFile> result(DQN_MEGABYTE(8));
 
     auto DQN_UNIQUE_NAME(mem_region) = global_func_local_allocator_.MemRegionScope();
     usize buf_size = 0;
@@ -720,7 +700,7 @@ DqnArray<SoundFile> MakeSoundFiles(Context *context, DqnVHashTable<DqnBuffer<wch
             continue;
         }
 
-        context->allocator.MemRegionSave(mem_region);
+        context->allocator.MemRegionSave(&mem_region);
         result.Push(sound_file);
 #else
         av_dump_format(fmt_context, 0, sound_file_path.str, 0);
@@ -728,6 +708,37 @@ DqnArray<SoundFile> MakeSoundFiles(Context *context, DqnVHashTable<DqnBuffer<wch
     }
 
     return result;
+}
+
+FILE_SCOPE inline u64 DqnWin32__FileTimeToEpoch(FILETIME file_time)
+{
+    ULARGE_INTEGER file_time_ularge = {};
+    file_time_ularge.LowPart        = file_time.dwLowDateTime;
+    file_time_ularge.HighPart       = file_time.dwHighDateTime;
+
+    u64 result = (file_time_ularge.QuadPart - 116444736000000000LL) / 10000000ULL;
+    return result;
+}
+
+void SanitiseStringForDiskFile(wchar_t *string)
+{
+    while(*string++)
+    {
+        switch (string[0])
+        {
+            case '?':
+            case ':':
+            case '\\':
+            case '/':
+            case '<':
+            case '>':
+            case '*':
+            case '|':
+            case '"':
+                string[0] = ' ';
+                break;
+        }
+    }
 }
 
 int main(int, char)
@@ -761,20 +772,20 @@ int main(int, char)
     file_tree_context.allocator = DqnMemStack(file_tree_allocator_mem, file_tree_allocator_mem_size, Dqn::ZeroMem::No, DqnMemStack::Flag::DefaultFlags);
     file_tree_context.logger    = context.logger;
     FileNode root               = {};
+    WPDHandles wpd_handles    = {};
     {
         state.opened_device              = OpenPortableDevice(&context, state.chosen_device.device_id.str);
         IPortableDevice *portable_device = state.opened_device.Get();
-        WPDReadSettings read_settings    = {};
-        if (!WPDMakeReadSettings(&context, portable_device, &read_settings))
+        if (!WPDGetWPDHandles(&context, portable_device, &wpd_handles))
         {
-            DQN_LOGGER_E(&context.logger, "Could not make WPDReadSettings");
+            DQN_LOGGER_E(&context.logger, "Could not make WPDHandles");
             return -1;
         }
 
         isize enum_count = 0;
         f64 start = DqnTimer_NowInMs();
         // TODO(doyle): #performance make an iterative solution. but not important now
-        WPDMakeFileTreeRecursively(&file_tree_context, &read_settings, WPD_DEVICE_OBJECT_ID, &root, &enum_count);
+        WPDMakeFileTreeRecursively(&file_tree_context, &wpd_handles, WPD_DEVICE_OBJECT_ID, &root, &enum_count);
         f64 end = DqnTimer_NowInMs();
 
         fprintf(stdout, "Device recursively visited: %zu items and took: %5.2fs\n", enum_count, (f32)(end - start)/1000.0f);
@@ -787,52 +798,83 @@ int main(int, char)
     DqnVHashTable<DqnBuffer<wchar_t>, SoundFile> playlist = ReadPlaylistFile(&context, L"Data/test2.m3u8");
     DqnArray<SoundFile> sounds                            = MakeSoundFiles(&context, &playlist);
 
-    isize sounds_to_dest_path_num = sounds.len;
-    auto *sounds_to_dest_path_mem = DQN_MEMSTACK_PUSH_ARRAY(&context.allocator, DqnBuffer<char>, sounds_to_dest_path_num);
-    DqnArray<DqnBuffer<char>> sounds_to_dest_path(sounds_to_dest_path_mem, sounds_to_dest_path_num);
+    isize sounds_to_rel_path_num = sounds.len;
+    auto *sounds_to_rel_path_mem = DQN_MEMSTACK_PUSH_ARRAY(&context.allocator, DqnBuffer<wchar_t>, sounds_to_rel_path_num);
+    DqnArray<DqnBuffer<wchar_t>> sounds_to_rel_path(sounds_to_rel_path_mem, sounds_to_rel_path_num);
 
     isize estimated_buf_chars = sounds.len; // for each sound file path, we also need a new line \n
-    for (SoundFile const &sound_file : sounds)
+    for (SoundFile &sound_file : sounds)
     {
         CheckAllocatorHasZeroAllocations(&global_func_local_allocator_);
-        wchar_t const *artist = (sound_file.metadata.artist) ? sound_file.metadata.artist.str : L"_";
-        wchar_t const *album  = (sound_file.metadata.album)  ? sound_file.metadata.album.str : L"_";
-        wchar_t const *title  = (sound_file.metadata.title)  ? sound_file.metadata.title.str : sound_file.name.str;
+        wchar_t *artist = (sound_file.metadata.artist) ? sound_file.metadata.artist.str : L"_";
+        wchar_t *album  = (sound_file.metadata.album)  ? sound_file.metadata.album.str : L"_";
+        wchar_t *title  = (sound_file.metadata.title)  ? sound_file.metadata.title.str : sound_file.name.str;
+
+        // NOTE(doyle): Destructive
+        SanitiseStringForDiskFile(artist);
+        SanitiseStringForDiskFile(album);
+        SanitiseStringForDiskFile(title);
+
+        context.allocator.SetAllocMode(DqnMemStack::AllocMode::Head);
+        DqnBuffer<wchar_t> rel_path = AllocateSwprintf(&context.allocator, L"Files\\%s\\%s\\%s.%s", artist, album, title, sound_file.extension.str);
+        sounds_to_rel_path.Push(rel_path);
+        estimated_buf_chars += rel_path.len;
 
         context.allocator.SetAllocMode(DqnMemStack::AllocMode::Tail);
-        DqnBuffer<wchar_t> dest_folder_path = AllocateSwprintf(&context.allocator,
-                                                               L"%s\\Files\\%s\\%s\\%s.%s",
-                                                               context.exe_directory.str,
-                                                               artist,
-                                                               album,
-                                                               title,
-                                                               sound_file.extension.str);
+        DqnBuffer<wchar_t> dest_path = AllocateSwprintf(&context.allocator, L"%s\\Output\\%s", context.exe_directory.str, rel_path.str);
         context.allocator.SetAllocMode(DqnMemStack::AllocMode::Head);
-        DQN_DEFER { context.allocator.Pop(dest_folder_path.str); };
+        DQN_DEFER { context.allocator.Pop(dest_path.str); };
 
-        DqnBuffer<char> *dest_folder_path_utf8 = sounds_to_dest_path.Make();
-        dest_folder_path_utf8->str = WCharToUTF8(&context.allocator, dest_folder_path.str, &dest_folder_path_utf8->len);
+        if (DqnFile_GetInfo(dest_path.str, nullptr))
+        {
+            continue;
+        }
 
-        estimated_buf_chars += dest_folder_path_utf8->len;
-        DQN_LOGGER_D(&context.logger, "%s", dest_folder_path_utf8->str);
+        DQN_FOR_EACH(buf_index, dest_path.len)
+        {
+            if (dest_path.str[buf_index] == '\\')
+            {
+                wchar_t tmp = dest_path.str[buf_index+1];
+                dest_path.str[buf_index+1] = 0;
+                CreateDirectoryW(dest_path.str, nullptr);
+                dest_path.str[buf_index+1] = tmp;
+            }
+        }
+
+        if (!CreateSymbolicLinkW(dest_path.str, sound_file.path.str, SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE))
+        {
+            DQN_LOGGER_E(
+                &context.logger,
+                "CreateSymbolicLinkW failed: %s. Could not make symbolic link from: %s -> %s",
+                DqnWin32_GetLastError(),
+                WCharToUTF8(&context.allocator, sound_file.path.str),
+                WCharToUTF8(&context.allocator, dest_path.str));
+        }
     }
 
-    DqnArray<char> m3u_buf = {};
-    m3u_buf.Reserve(estimated_buf_chars + /*safety_margin*/ 1024);
-    for (DqnBuffer<char> const &output_path : sounds_to_dest_path)
+    DQN_ASSERT(sounds.len == sounds_to_rel_path.len);
+    // Make M3U8 playlist
     {
-        auto DQN_UNIQUE_NAME(mem_scope) = context.allocator.MemRegionScope();
-        m3u_buf.Push(output_path.str, output_path.len - 1);
-        m3u_buf.Push('\n');
-    }
-    m3u_buf.Push('\0');
+        DqnArray<char> m3u_buf = {};
+        m3u_buf.Reserve(estimated_buf_chars + /*safety_margin*/ 1024);
+        for (DqnBuffer<wchar_t> const &output_path : sounds_to_rel_path)
+        {
+            auto DQN_UNIQUE_NAME(mem_scope) = context.allocator.MemRegionScope();
+            DqnBuffer<char> utf8 = {};
+            utf8.str = WCharToUTF8(&context.allocator, output_path.str, &utf8.len);
 
-    // NOTE(doyle): len - 1, don't write the null terminating byte
-    if (!DqnFile_WriteAll("Data/output_result.m3u8",
-                          reinterpret_cast<u8 *>(m3u_buf.data),
-                          (m3u_buf.len - 1) * sizeof(m3u_buf.data[0])))
-    {
-        DQN_LOGGER_E(&context.logger, "DqnFile_WriteAll failed: Could not write m3u file to destination.");
+            m3u_buf.Push(utf8.str, utf8.len - 1);
+            m3u_buf.Push('\n');
+        }
+        m3u_buf.Push('\0');
+
+        // NOTE(doyle): len - 1, don't write the null terminating byte
+        if (!DqnFile_WriteAll("Bin\\Output\\playlist.m3u8",
+                              reinterpret_cast<u8 *>(m3u_buf.data),
+                              (m3u_buf.len - 1) * sizeof(m3u_buf.data[0])))
+        {
+            DQN_LOGGER_E(&context.logger, "DqnFile_WriteAll failed: Could not write m3u file to destination.");
+        }
     }
 
     return 0;
