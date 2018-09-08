@@ -623,15 +623,20 @@ void CheckAllocatorHasZeroAllocations(DqnMemStack const *allocator)
 
 DqnArray<SoundFile> MakeSoundFiles(Context *context, DqnVHashTable<DqnBuffer<wchar_t>, SoundFile> *playlist)
 {
-    void *buf = context->allocator.Push(playlist->num_used_entries * sizeof(SoundFile));
+    auto DQN_UNIQUE_NAME(mem_region) = global_func_local_allocator_.MemRegionScope();
+    context->logger.no_console = true;
+    DQN_DEFER { context->logger.no_console = false; };
+
+    int stored_log_msgs_len   = 128; // Anymore than 128, we have big syncing problems so don't care
+    auto *stored_log_msgs_mem = DQN_MEMSTACK_PUSH_ARRAY(&global_func_local_allocator_, DqnBuffer<char>, stored_log_msgs_len);
+    DqnArray<DqnBuffer<char>> stored_log_msgs(stored_log_msgs_mem, stored_log_msgs_len);
+
+    void *buf   = context->allocator.Push(playlist->num_used_entries * sizeof(SoundFile));
     auto result = DqnArray<SoundFile>(static_cast<SoundFile *>(buf), playlist->num_used_entries);
 
     for (DqnVHashTable<DqnBuffer<wchar_t>, SoundFile>::Entry const &entry : *playlist)
     {
-        CheckAllocatorHasZeroAllocations(&global_func_local_allocator_);
-
-        auto DQN_UNIQUE_NAME(mem_region) = global_func_local_allocator_.MemRegionScope();
-        auto mem_region                  = context->allocator.MemRegionScope();
+        auto mem_region = context->allocator.MemRegionScope();
 
         DqnBuffer<wchar_t> const sound_path = entry.key;
         DqnBuffer<char> sound_path_utf8     = {};
@@ -644,13 +649,6 @@ DqnArray<SoundFile> MakeSoundFiles(Context *context, DqnVHashTable<DqnBuffer<wch
             continue;
         }
         DQN_DEFER { avformat_close_input(&fmt_context); };
-
-        // TODO(doyle): Verify what this does
-        if (avformat_find_stream_info(fmt_context, nullptr) < 0)
-        {
-            DQN_LOGGER_E(&context->logger, "avformat_find_stream_info: failed to find stream info");
-            continue;
-        }
 
 #if 1
         SoundFile sound_file = {};
@@ -696,7 +694,9 @@ DqnArray<SoundFile> MakeSoundFiles(Context *context, DqnVHashTable<DqnBuffer<wch
 
         if (!atleast_one_entry_filled)
         {
-            DQN_LOGGER_W(&context->logger, "No metadata could be parsed for file: %s", entry.key.str);
+            char const *msg = DQN_LOGGER_W(&context->logger, "No metadata could be parsed for file: %s", entry.key.str);
+            DqnBuffer<char> msg_buf = CopyStringToBuffer(&global_func_local_allocator_, msg);
+            stored_log_msgs.Push(msg_buf);
             continue;
         }
 
@@ -705,6 +705,12 @@ DqnArray<SoundFile> MakeSoundFiles(Context *context, DqnVHashTable<DqnBuffer<wch
 #else
         av_dump_format(fmt_context, 0, sound_file_path.str, 0);
 #endif
+    }
+
+    context->logger.no_console = true;
+    for (DqnBuffer<char> const &msg : stored_log_msgs)
+    {
+        context->logger.LogNoContext(DqnLogger::Type::Warning, msg.str);
     }
 
     return result;
@@ -744,8 +750,8 @@ void SanitiseStringForDiskFile(wchar_t *string)
 int main(int, char)
 {
     Context context              = {};
-    context.allocator            = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroMem::Yes, DqnMemStack::Flag::DefaultFlags);
-    global_func_local_allocator_ = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroMem::Yes, DqnMemStack::Flag::DefaultFlags);
+    context.allocator            = DqnMemStack(DQN_MEGABYTE(16), Dqn::ZeroMem::Yes, DqnMemStack::Flag::BoundsGuard);
+    global_func_local_allocator_ = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroMem::Yes, DqnMemStack::Flag::BoundsGuard);
     DqnWin32_GetExeNameAndDirectory(&context.allocator, &context.exe_name, &context.exe_directory);
 
 #if 0
@@ -795,86 +801,112 @@ int main(int, char)
     FileNode const *chosen_path      = PromptSelectFile(&root, &abs_file_path);
 #endif
 
-    DqnVHashTable<DqnBuffer<wchar_t>, SoundFile> playlist = ReadPlaylistFile(&context, L"Data/test2.m3u8");
-    DqnArray<SoundFile> sounds                            = MakeSoundFiles(&context, &playlist);
-
-    isize sounds_to_rel_path_num = sounds.len;
-    auto *sounds_to_rel_path_mem = DQN_MEMSTACK_PUSH_ARRAY(&context.allocator, DqnBuffer<wchar_t>, sounds_to_rel_path_num);
-    DqnArray<DqnBuffer<wchar_t>> sounds_to_rel_path(sounds_to_rel_path_mem, sounds_to_rel_path_num);
-
-    isize estimated_buf_chars = sounds.len; // for each sound file path, we also need a new line \n
-    for (SoundFile &sound_file : sounds)
+    i32 num_files    = 0;
+    char **dir_files = DqnFile_ListDir(".\\Data\\*", &num_files);
+    DQN_DEFER { DqnFile_ListDirFree(dir_files, num_files); };
+    DQN_FOR_EACH(dir_index, num_files)
     {
-        CheckAllocatorHasZeroAllocations(&global_func_local_allocator_);
-        wchar_t *artist = (sound_file.metadata.artist) ? sound_file.metadata.artist.str : L"_";
-        wchar_t *album  = (sound_file.metadata.album)  ? sound_file.metadata.album.str : L"_";
-        wchar_t *title  = (sound_file.metadata.title)  ? sound_file.metadata.title.str : sound_file.name.str;
+        auto DQN_UNIQUE_NAME(mem_scope) = context.allocator.MemRegionScope();
+        auto DQN_UNIQUE_NAME(mem_scope) = global_func_local_allocator_.MemRegionScope();
 
-        // NOTE(doyle): Destructive
-        SanitiseStringForDiskFile(artist);
-        SanitiseStringForDiskFile(album);
-        SanitiseStringForDiskFile(title);
+        char const *playlist_file = dir_files[dir_index];
+        DqnBuffer<wchar_t> playlist_file_path = AllocateSwprintf(&context.allocator, L".\\Data\\%s", UTF8ToWChar(&context.allocator, playlist_file));
 
-        context.allocator.SetAllocMode(DqnMemStack::AllocMode::Head);
-        DqnBuffer<wchar_t> rel_path = AllocateSwprintf(&context.allocator, L"Files\\%s\\%s\\%s.%s", artist, album, title, sound_file.extension.str);
-        sounds_to_rel_path.Push(rel_path);
-        estimated_buf_chars += rel_path.len;
-
-        context.allocator.SetAllocMode(DqnMemStack::AllocMode::Tail);
-        DqnBuffer<wchar_t> dest_path = AllocateSwprintf(&context.allocator, L"%s\\Output\\%s", context.exe_directory.str, rel_path.str);
-        context.allocator.SetAllocMode(DqnMemStack::AllocMode::Head);
-        DQN_DEFER { context.allocator.Pop(dest_path.str); };
-
-        if (DqnFile_GetInfo(dest_path.str, nullptr))
+        DqnVHashTable<DqnBuffer<wchar_t>, SoundFile> playlist = ReadPlaylistFile(&context, playlist_file_path.str);
+        DQN_DEFER
         {
+            playlist.Free();
+        };
+
+        if (playlist.num_used_entries == 0)
+        {
+            // TODO(doyle): Memory leak of playlist name, but insignificant on conversion to wchar_t
             continue;
         }
 
-        DQN_FOR_EACH(buf_index, dest_path.len)
+        DqnArray<SoundFile> sounds = MakeSoundFiles(&context, &playlist);
+
+        isize sounds_to_rel_path_num = sounds.len;
+        auto *sounds_to_rel_path_mem = DQN_MEMSTACK_PUSH_ARRAY(&context.allocator, DqnBuffer<wchar_t>, sounds_to_rel_path_num);
+        DqnArray<DqnBuffer<wchar_t>> sounds_to_rel_path(sounds_to_rel_path_mem, sounds_to_rel_path_num);
+
+        isize estimated_buf_chars = sounds.len; // for each sound file path, we also need a new line \n
+        for (SoundFile &sound_file : sounds)
         {
-            if (dest_path.str[buf_index] == '\\')
+            CheckAllocatorHasZeroAllocations(&global_func_local_allocator_);
+            wchar_t *artist = (sound_file.metadata.artist) ? sound_file.metadata.artist.str : L"_";
+            wchar_t *album  = (sound_file.metadata.album)  ? sound_file.metadata.album.str : L"_";
+            wchar_t *title  = (sound_file.metadata.title)  ? sound_file.metadata.title.str : sound_file.name.str;
+
+            // NOTE(doyle): Destructive
+            SanitiseStringForDiskFile(artist);
+            SanitiseStringForDiskFile(album);
+            SanitiseStringForDiskFile(title);
+
+            context.allocator.SetAllocMode(DqnMemStack::AllocMode::Head);
+            DqnBuffer<wchar_t> rel_path = AllocateSwprintf(&context.allocator, L"Files\\%s\\%s\\%s.%s", artist, album, title, sound_file.extension.str);
+            sounds_to_rel_path.Push(rel_path);
+            estimated_buf_chars += rel_path.len;
+
+            context.allocator.SetAllocMode(DqnMemStack::AllocMode::Tail);
+            DqnBuffer<wchar_t> dest_path = AllocateSwprintf(&context.allocator, L"%s\\Output\\%s", context.exe_directory.str, rel_path.str);
+            context.allocator.SetAllocMode(DqnMemStack::AllocMode::Head);
+            DQN_DEFER { context.allocator.Pop(dest_path.str); };
+
+            if (DqnFile_GetInfo(dest_path.str, nullptr))
             {
-                wchar_t tmp = dest_path.str[buf_index+1];
-                dest_path.str[buf_index+1] = 0;
-                CreateDirectoryW(dest_path.str, nullptr);
-                dest_path.str[buf_index+1] = tmp;
+                continue;
+            }
+
+            DQN_FOR_EACH(buf_index, dest_path.len)
+            {
+                if (dest_path.str[buf_index] == '\\')
+                {
+                    wchar_t tmp = dest_path.str[buf_index+1];
+                    dest_path.str[buf_index+1] = 0;
+                    CreateDirectoryW(dest_path.str, nullptr);
+                    dest_path.str[buf_index+1] = tmp;
+                }
+            }
+
+            if (!CreateSymbolicLinkW(dest_path.str, sound_file.path.str, SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE))
+            {
+                DQN_LOGGER_E(
+                    &context.logger,
+                    "CreateSymbolicLinkW failed: %s. Could not make symbolic link from: %s -> %s",
+                    DqnWin32_GetLastError(),
+                    WCharToUTF8(&context.allocator, sound_file.path.str),
+                    WCharToUTF8(&context.allocator, dest_path.str));
             }
         }
 
-        if (!CreateSymbolicLinkW(dest_path.str, sound_file.path.str, SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE))
+        DQN_ASSERT(sounds.len == sounds_to_rel_path.len);
+        // Make M3U8 playlist
         {
-            DQN_LOGGER_E(
-                &context.logger,
-                "CreateSymbolicLinkW failed: %s. Could not make symbolic link from: %s -> %s",
-                DqnWin32_GetLastError(),
-                WCharToUTF8(&context.allocator, sound_file.path.str),
-                WCharToUTF8(&context.allocator, dest_path.str));
-        }
-    }
+            DqnArray<char> m3u_buf = {};
+            m3u_buf.Reserve(estimated_buf_chars + /*safety_margin*/ 1024);
+            for (DqnBuffer<wchar_t> const &output_path : sounds_to_rel_path)
+            {
+                auto DQN_UNIQUE_NAME(mem_scope) = context.allocator.MemRegionScope();
+                DqnBuffer<char> utf8 = {};
+                utf8.str = WCharToUTF8(&context.allocator, output_path.str, &utf8.len);
 
-    DQN_ASSERT(sounds.len == sounds_to_rel_path.len);
-    // Make M3U8 playlist
-    {
-        DqnArray<char> m3u_buf = {};
-        m3u_buf.Reserve(estimated_buf_chars + /*safety_margin*/ 1024);
-        for (DqnBuffer<wchar_t> const &output_path : sounds_to_rel_path)
-        {
-            auto DQN_UNIQUE_NAME(mem_scope) = context.allocator.MemRegionScope();
-            DqnBuffer<char> utf8 = {};
-            utf8.str = WCharToUTF8(&context.allocator, output_path.str, &utf8.len);
+                m3u_buf.Push(utf8.str, utf8.len - 1);
+                m3u_buf.Push('\n');
+            }
+            m3u_buf.Push('\0');
 
-            m3u_buf.Push(utf8.str, utf8.len - 1);
-            m3u_buf.Push('\n');
+            // NOTE(doyle): len - 1, don't write the null terminating byte
+            DqnFixedString1024 output_playlist_file = "Bin\\Output\\";
+            output_playlist_file += playlist_file;
+            if (!DqnFile_WriteAll(output_playlist_file.str,
+                                  reinterpret_cast<u8 *>(m3u_buf.data),
+                                  (m3u_buf.len - 1) * sizeof(m3u_buf.data[0])))
+            {
+                DQN_LOGGER_E(&context.logger, "DqnFile_WriteAll failed: Could not write m3u file to destination.");
+            }
         }
-        m3u_buf.Push('\0');
 
-        // NOTE(doyle): len - 1, don't write the null terminating byte
-        if (!DqnFile_WriteAll("Bin\\Output\\playlist.m3u8",
-                              reinterpret_cast<u8 *>(m3u_buf.data),
-                              (m3u_buf.len - 1) * sizeof(m3u_buf.data[0])))
-        {
-            DQN_LOGGER_E(&context.logger, "DqnFile_WriteAll failed: Could not write m3u file to destination.");
-        }
     }
 
     return 0;
