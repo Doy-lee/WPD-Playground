@@ -631,8 +631,8 @@ DqnArray<SoundFile> MakeSoundFiles(Context *context, DqnVHashTable<DqnBuffer<wch
     auto *stored_log_msgs_mem = DQN_MEMSTACK_PUSH_ARRAY(&global_func_local_allocator_, DqnBuffer<char>, stored_log_msgs_len);
     DqnArray<DqnBuffer<char>> stored_log_msgs(stored_log_msgs_mem, stored_log_msgs_len);
 
-    void *buf   = context->allocator.Push(playlist->num_used_entries * sizeof(SoundFile));
-    auto result = DqnArray<SoundFile>(static_cast<SoundFile *>(buf), playlist->num_used_entries);
+    auto *buf   = DQN_MEMSTACK_PUSH_ARRAY(&context->allocator, SoundFile, playlist->num_used_entries);
+    auto result = DqnArray<SoundFile>(buf, playlist->num_used_entries);
 
     for (DqnVHashTable<DqnBuffer<wchar_t>, SoundFile>::Entry const &entry : *playlist)
     {
@@ -750,8 +750,8 @@ void SanitiseStringForDiskFile(wchar_t *string)
 int main(int, char)
 {
     Context context              = {};
-    context.allocator            = DqnMemStack(DQN_MEGABYTE(16), Dqn::ZeroMem::Yes, DqnMemStack::Flag::BoundsGuard);
-    global_func_local_allocator_ = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroMem::Yes, DqnMemStack::Flag::BoundsGuard);
+    context.allocator            = DqnMemStack(DQN_MEGABYTE(16), Dqn::ZeroMem::Yes, 0, DqnMemTracker::All);
+    global_func_local_allocator_ = DqnMemStack(DQN_MEGABYTE(1), Dqn::ZeroMem::Yes, 0, DqnMemTracker::All);
     DqnWin32_GetExeNameAndDirectory(&context.allocator, &context.exe_name, &context.exe_directory);
 
 #if 0
@@ -869,6 +869,7 @@ int main(int, char)
                 }
             }
 
+#if 0
             if (!CreateSymbolicLinkW(dest_path.str, sound_file.path.str, SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE))
             {
                 DQN_LOGGER_E(
@@ -878,6 +879,7 @@ int main(int, char)
                     WCharToUTF8(&context.allocator, sound_file.path.str),
                     WCharToUTF8(&context.allocator, dest_path.str));
             }
+#endif
         }
 
         DQN_ASSERT(sounds.len == sounds_to_rel_path.len);
@@ -897,6 +899,7 @@ int main(int, char)
             m3u_buf.Push('\0');
 
             // NOTE(doyle): len - 1, don't write the null terminating byte
+#if 0
             DqnFixedString1024 output_playlist_file = "Bin\\Output\\";
             output_playlist_file += playlist_file;
             if (!DqnFile_WriteAll(output_playlist_file.str,
@@ -905,6 +908,7 @@ int main(int, char)
             {
                 DQN_LOGGER_E(&context.logger, "DqnFile_WriteAll failed: Could not write m3u file to destination.");
             }
+#endif
         }
 
     }

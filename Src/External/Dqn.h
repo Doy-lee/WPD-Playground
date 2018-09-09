@@ -21,9 +21,12 @@
 // You can search by #<entry> to jump straight to the section.
 // The first match is the public API, the next matche(s) are the implementation
 
+// #Preprocessor Checks
 // #Portable Code
-// #DqnDefer       Macro helper/template to implement defer in C++
+// #Library Settings
+// #Win32 Prototypes
 // #DqnSprintf     Cross-platform Sprintf Implementation (Public Domain lib stb_sprintf)
+// #DqnDefer       Macro helper/template to implement defer in C++
 // #DqnAssert      Assertions and Logging
 // #DqnSlice       A ptr and length into memory but doesn't imply ownership of memory
 // #DqnBuffer      Typedef to slices, but indicates ownership of the memory
@@ -71,7 +74,7 @@
 // - Mbuildake lib compile and run on Linux with GCC using -03
 // - Make DqnV* operations be static to class for consistency?
 
-// Preprocessor Checks
+// #Preprocessor Checks
 // =================================================================================================
 // This needs to be above the portable layer so  that, if the user requests a platform
 // implementation, platform specific implementations in the portable layer will get activated.
@@ -164,25 +167,8 @@ using f32 = float;
 #define DQN_UNIQUE_NAME(prefix) DQN_TOKEN_COMBINE2(prefix, __COUNTER__)
 #define DQN_FOR_EACH(i, lim) for (isize (i) = 0; (i) < (isize)(lim); ++(i))
 
-#define DQN_SIZEOF(decl) (isize)sizeof(decl)
-
-template <typename Proc>
-struct DqnDefer_
-{
-     DqnDefer_(Proc p) : proc(p) { }
-    ~DqnDefer_()                 { proc(); }
-    Proc proc;
-};
-
-struct DqnDeferHelper_
-{
-    template <typename Proc>
-    DqnDefer_<Proc> operator+(Proc proc) { return DqnDefer_<Proc>(proc); };
-};
-
-#define DQN_DEFER const auto DQN_UNIQUE_NAME(dqn_defer_lambda_) = DqnDeferHelper_() + [&]()
-
-// #Dqn Namespace
+// #Library Settings
+// =================================================================================================
 namespace Dqn
 {
 enum struct ZeroMem    { No = 0, Yes = 1};
@@ -190,7 +176,8 @@ enum struct IgnoreCase { No = 0, Yes = 1};
 FILE_SCOPE const bool IsDebug = true;
 }; // namespace Dqn
 
-// #External Code
+
+// #Win32 Prototypes
 // =================================================================================================
 #if defined(DQN_PLATFORM_HEADER) && defined(DQN_IS_WIN32) && !defined(_WINDOWS_)
 using WORD      = unsigned short;
@@ -693,6 +680,24 @@ STBSP__PUBLICDEF int STB_SPRINTF_DECORATE(vsprintfcb)(STBSP_SPRINTFCB *callback,
 STBSP__PUBLICDEF void STB_SPRINTF_DECORATE(set_separators)(char comma, char period);
 #endif // STB_SPRINTF_H_INCLUDE
 
+// #DqnDefer
+// =================================================================================================
+template <typename Proc>
+struct DqnDefer_
+{
+     DqnDefer_(Proc p) : proc(p) { }
+    ~DqnDefer_()                 { proc(); }
+    Proc proc;
+};
+
+struct DqnDeferHelper_
+{
+    template <typename Proc>
+    DqnDefer_<Proc> operator+(Proc proc) { return DqnDefer_<Proc>(proc); };
+};
+
+#define DQN_DEFER const auto DQN_UNIQUE_NAME(dqn_defer_lambda_) = DqnDeferHelper_() + [&]()
+
 // #DqnAssert API
 // =================================================================================================
 // NOTE: "## __VA_ARGS__" is a GCC hack. Zero variadic arguments won't compile
@@ -709,7 +714,7 @@ STBSP__PUBLICDEF void STB_SPRINTF_DECORATE(set_separators)(char comma, char peri
     {                                                                                              \
         if (!(expr))                                                                               \
         {                                                                                          \
-            dqn_logger_.Log(DqnLogger::Type::Error, {__FILE__, DQN_CHAR_COUNT(__FILE__), __func__, DQN_CHAR_COUNT(__func__), __LINE__}, "["#expr"] " msg, ## __VA_ARGS__); \
+            dqn_lib_context_->logger.Log(DqnLogger::Type::Error, {__FILE__, DQN_CHAR_COUNT(__FILE__), __func__, DQN_CHAR_COUNT(__func__), __LINE__}, "["#expr"] " msg, ## __VA_ARGS__); \
             (*((int *)0)) = 0;                                                                     \
         }                                                                                          \
     } while (0)
@@ -718,7 +723,7 @@ STBSP__PUBLICDEF void STB_SPRINTF_DECORATE(set_separators)(char comma, char peri
 #define DQN_COMPILE_ASSERT(expr)                DQN_COMPILE_ASSERT_INTERNAL(expr, DQN_UNIQUE_NAME(DqnCompileAssertInternal_))
 #define DQN_COMPILE_ASSERT_INTERNAL(expr, name) typedef char name[((int)(expr)) * 2 - 1];
 
-extern struct DqnLogger dqn_logger_;
+extern struct DqnLibContext *dqn_lib_context_;
 
 DQN_COMPILE_ASSERT(sizeof(isize) == sizeof(usize));
 
@@ -747,6 +752,8 @@ using DqnBuffer = DqnSlice<T>;
 
 #define DQN_SLICE_STRCMP(a, b, ignore_case) ((a).len == (b).len && (DqnStr_Cmp((char *)((a).str), (char *)((b).str), (a).len, ignore_case) == 0))
 #define DQN_SLICE_MEMCMP(a, b)              ((a).len == (b).len && (DqnMem_Cmp((void *)((a).str), (void *)((b).str), (a).len) == 0))
+
+DQN_FILE_SCOPE DqnBuffer<char> DqnBuffer_CopyString(struct DqnAllocator *allocator, char const *str, int len = -1);
 
 // #DqnFixedString Public API - Fixed sized strings at compile time
 // =================================================================================================
@@ -809,14 +816,46 @@ using DqnFixedString2048 = DqnFixedString<2048>;
 // #DqnMem
 // =================================================================================================
 // TODO(doyle): Use platform allocation, fallback to malloc if platform not defined
-DQN_FILE_SCOPE void *DqnMem_Alloc  (usize size);
-DQN_FILE_SCOPE void *DqnMem_Calloc (usize size);
-DQN_FILE_SCOPE void  DqnMem_Clear  (void *memory, u8 clear_val, usize size);
-DQN_FILE_SCOPE void *DqnMem_Realloc(void *memory, usize new_size);
-DQN_FILE_SCOPE void  DqnMem_Free   (void *memory);
-DQN_FILE_SCOPE void  DqnMem_Copy   (void *dest, void const *src, usize num_bytes_to_copy);
-DQN_FILE_SCOPE void *DqnMem_Set    (void *dest, u8 value,        usize num_bytes_to_set);
-DQN_FILE_SCOPE int   DqnMem_Cmp(void const *src, void const *dest, usize num_bytes);
+DQN_FILE_SCOPE void *DqnMem_Alloc   (usize size);
+DQN_FILE_SCOPE void *DqnMem_XAlloc  (usize size);
+DQN_FILE_SCOPE void *DqnMem_XCalloc (usize size);
+DQN_FILE_SCOPE void  DqnMem_Clear   (void *memory, u8 clear_val, usize size);
+DQN_FILE_SCOPE void *DqnMem_Realloc (void *memory, usize new_size);
+DQN_FILE_SCOPE void *DqnMem_XRealloc(void *memory, usize new_size);
+DQN_FILE_SCOPE void  DqnMem_Free    (void *memory);
+DQN_FILE_SCOPE void  DqnMem_Copy    (void *dest, void const *src, usize num_bytes_to_copy);
+DQN_FILE_SCOPE void *DqnMem_Set     (void *dest, u8 value,        usize num_bytes_to_set);
+DQN_FILE_SCOPE int   DqnMem_Cmp     (void const *src, void const *dest, usize num_bytes);
+
+// #DqnAllocator
+// =================================================================================================
+// A generic structure for managing memory allocations for different Dqn data structures.
+struct DqnAllocator
+{
+    enum struct Type
+    {
+        None,          // Malloc, realloc, free
+        XAllocator,    // Malloc, realloc, free, crash on failure
+        VirtualMemory, // VirtualAlloc, VirtualFree, mmap, munmap
+        DqnMemStack,
+    };
+
+    Type  type;
+    void *user_context;
+
+    DqnAllocator() = default;
+    DqnAllocator(Type type_)                    { *this = {}; type = type_; }
+    DqnAllocator(struct DqnMemStack *mem_stack) { *this = {}; type = Type::DqnMemStack; user_context = mem_stack; }
+
+    void *Malloc (size_t size, Dqn::ZeroMem zero = Dqn::ZeroMem::No);
+    void *Realloc(void *ptr, size_t new_size);
+    void  Free   (void *ptr, size_t old_size);
+};
+
+DqnAllocator  DQN_DEFAULT_ALLOCATOR_ = {};
+DqnAllocator  DQN_XALLOCATOR_(DqnAllocator::Type::XAllocator);
+DqnAllocator *DQN_DEFAULT_ALLOCATOR  = &DQN_DEFAULT_ALLOCATOR_;
+DqnAllocator *DQN_XALLOCATOR         = &DQN_XALLOCATOR_;
 
 // #DqnMemTracker
 // =================================================================================================
@@ -837,61 +876,76 @@ struct DqnPtrHeader
 {
     u8    offset_to_src_ptr; // Offset to subtract from the client ptr to receive the allocation ptr
     u8    alignment;
-    u8    alloc_type;
+    u8    alloc_type; // TODO(doyle): alloc_type is a memstack specific thing
     usize alloc_amount;
 };
 #pragma pack(pop)
 
 struct DqnMemTracker
 {
+    enum Params
+    {
+        None          = 0,
+        TrackPtr      = (1 << 0),
+        BoundsGuard   = (1 << 1),
+        TagAllocation = (1 << 2),
+        Simple        = (TrackPtr | BoundsGuard),
+        All           = (TrackPtr | BoundsGuard | TagAllocation),
+    };
+
     static u32 const HEAD_GUARD_VALUE   = 0xCAFEBABE;
     static u32 const TAIL_GUARD_VALUE   = 0xDEADBEEF;
 
-    void  **ptrs;       // Read: When BoundsGuard is enabled, tracks all allocated ptrs.
+    void  **ptrs;              // If track_ptr was set, ptrs is an array to all the pointers that get passed through SetupPtr, otherwise null
     int     ptrs_len;
     int     ptrs_max;
+    u32     bounds_guard_size; // If bounds_guard was set, sizeof(GUARD_VALUE) otherwise 0
 
-    u32     bounds_guard_size; // Read: sizeof(GUARD_VALUE) OR 0 if BoundsGuard is disabled.
+    struct TaggedAllocation
+    {
+        DqnBuffer<char>   filename;
+        DqnBuffer<char>   function;
+        size_t            line_num;
+        isize             bytes_allocated;
+        TaggedAllocation *next;
+    };
 
-    void   Init                (bool bounds_guard);
-    void   Free                ()                               { DqnMem_Free(ptrs); }
-    void   AddAllocation       (char *ptr);
-    void   RemoveAllocation    (char *ptr);
+    u16                tagged_allocs_max;
+    TaggedAllocation **tagged_allocs;
+    u16               *tagged_allocs_used_list;
+    u16                tagged_allocs_used_index;
 
-    void   CheckAllocations    ()                         const;
-    usize  GetAllocationSize   (usize size, u8 alignment) const { return sizeof(DqnPtrHeader) + bounds_guard_size + (alignment - 1) + size + bounds_guard_size; }
+    void   Init                (Params params);
+    void   Free                ();
+    bool   IsTrackingPtrs      () const                           { return (ptrs != nullptr); }
+    bool   IsGuardingBounds    () const                           { return (bounds_guard_size > 0); }
+    bool   IsTaggingAllocations() const                           { return (tagged_allocs_used_index > 0); } // TODO(doyle): Just store the flags instead of these unreasonable checks
+
+#define DQN_STRINGIFY(val) DQN_STRINGIFY2(val)
+#define DQN_STRINGIFY2(val) #val
+#define DQN_MEMTRACKER_TAG_ALLOC(memtracker, ptr, size) (memtracker)->Tag_(DQN_BUFFER_STR_LIT(__FILE__), DQN_BUFFER_STR_LIT(__func__), __LINE__, DQN_BUFFER_STR_LIT(__FILE__ DQN_STRINGIFY(__LINE__)), (isize)size)
+    void   Tag_(DqnBuffer<const char> filename, DqnBuffer<const char> function, int line_num, DqnBuffer<const char> filename_line_num_data, isize bytes);
+
+    // MemTracker setups up the ptr by adding a DqnPtrHeader to each given ptr. When the client
+    // requests an allocation, use GetAllocationSize() to get the adjusted size necessary for adding
+    // the tracking metadata, then pass in the allocated ptr into SetupPtr.
+
+    // If MemTracker was init with
+    // - track_ptr:    it also tracks each ptr passed in
+    // - bounds_guard: it also adds a 4 byte magic value on both sides of the ptr
+    // size: The original size requested, i.e. before GetAllocationSize adjusted it
+    void  *SetupPtr            (void *ptr, isize size, u8 alignment);
+
+    void   RemovePtr           (void *ptr);
+    void   RemovePtrRange      (void *begin, void *end);
+    void   CheckPtrs           ()                             const;
+    usize  GetAllocationSize   (usize size, u8 alignment = 1) const { return sizeof(DqnPtrHeader) + bounds_guard_size + (alignment - 1) + size + bounds_guard_size; }
 
     // ptr: The ptr given to the client when allocating.
     u32          *PtrToHeadGuard (char *ptr) const { return reinterpret_cast<u32 *>(ptr - bounds_guard_size);  }
     u32          *PtrToTailGuard (char *ptr) const { return reinterpret_cast<u32 *>(ptr + PtrToHeader(ptr)->alloc_amount); }
     DqnPtrHeader *PtrToHeader    (char *ptr) const { return reinterpret_cast<DqnPtrHeader *>(ptr - bounds_guard_size - sizeof(DqnPtrHeader)); }
 };
-
-// #DqnAllocator
-// =================================================================================================
-// A generic structure for managing memory allocations for different Dqn data structures.
-struct DqnAllocator
-{
-    enum struct Type
-    {
-        None,
-        VirtualMemory,
-        DqnMemStack,
-    };
-
-    Type  type;
-    void *user_context;
-
-    DqnAllocator() = default;
-    DqnAllocator(struct DqnMemStack *mem_stack) { *this = {}; type = Type::DqnMemStack; user_context = mem_stack; }
-
-    void *Malloc (size_t size, Dqn::ZeroMem zero = Dqn::ZeroMem::No);
-    void *Realloc(void *ptr, size_t new_size);
-    void  Free   (void *ptr, size_t old_size);
-};
-
-DqnAllocator  DQN_DEFAULT_ALLOCATOR_ = {};
-DqnAllocator *DQN_DEFAULT_ALLOCATOR  = &DQN_DEFAULT_ALLOCATOR_;
 
 // #DqnMemStack
 // =================================================================================================
@@ -916,8 +970,10 @@ DqnAllocator *DQN_DEFAULT_ALLOCATOR  = &DQN_DEFAULT_ALLOCATOR_;
 // always exists some non-user facing global allocator that is accessible which
 // it can use.
 
-#define DQN_MEMSTACK_PUSH_STRUCT(memstack, Type)     (Type *)(memstack)->Push(sizeof(Type))
-#define DQN_MEMSTACK_PUSH_ARRAY(memstack, Type, num) (Type *)(memstack)->Push(sizeof(Type) * (num))
+#define DQN_MEMSTACK_PUSH(memstack, size)            DQN_MEMSTACK_PUSH_ARRAY(memstack, char, size)
+#define DQN_MEMSTACK_PUSH_STRUCT(memstack, DataType) DQN_MEMSTACK_PUSH_ARRAY(memstack, DataType, 1)
+#define DQN_MEMSTACK_PUSH_ARRAY(memstack, DataType, num) (DataType *)(memstack)->Push_(sizeof(DataType) * (num));
+
 struct DqnMemStack
 {
     static const i32 MINIMUM_BLOCK_SIZE = DQN_KILOBYTE(64);
@@ -926,10 +982,7 @@ struct DqnMemStack
     {
         NonExpandable       = (1 << 0), // Disallow additional memory blocks when full.
         NonExpandableAssert = (1 << 1), // Assert when non-expandable is set and we run out of space
-        BoundsGuard         = (1 << 2), // Track, check and add 4 byte guards on the boundaries of all allocations
-        PushAssertsOnFail   = (1 << 3), // Assert when push() fails.
-        DefaultAllocateTail = (1 << 4), // If set, allocate to tail when push_type is unspecified, otherwise allocate to head
-        DefaultFlags        = (NonExpandable | NonExpandableAssert | BoundsGuard | PushAssertsOnFail),
+        DefaultAllocateTail = (1 << 2), // Allocate to tail when push_type is unspecified, otherwise allocate to head
     };
 
     struct Info // Statistics of the memory stack.
@@ -961,12 +1014,12 @@ struct DqnMemStack
 
     // Initialisation
     // =============================================================================================
-    DqnMemStack() = default;                                                // Zero Is Initialisation, on first allocation LazyInit() is called.
-    DqnMemStack(void *mem, isize size, Dqn::ZeroMem clear, u32 flags_ = 0); // Use fixed memory from the given buffer. Assert after buffer is full.
+    DqnMemStack() = default;                                                                                                      // Zero Is Initialisation, on first allocation LazyInit() is called.
+    DqnMemStack(void *mem, isize size, Dqn::ZeroMem clear, u32 flags_ = 0, DqnMemTracker::Params params = DqnMemTracker::Simple); // Use fixed memory from the given buffer. Assert after buffer is full.
 
     // Init and alloc additional memory blocks when full, but only if NonExpandable flag is not set.
-    DqnMemStack  (isize size, Dqn::ZeroMem clear, u32 flags_ = 0, DqnAllocator *block_allocator_ = DQN_DEFAULT_ALLOCATOR) { LazyInit(size, clear, flags_, block_allocator_); }
-    void LazyInit(isize size, Dqn::ZeroMem clear, u32 flags_ = 0, DqnAllocator *block_allocator_ = DQN_DEFAULT_ALLOCATOR);
+    DqnMemStack  (isize size, Dqn::ZeroMem clear, u32 flags_ = 0, DqnMemTracker::Params params = DqnMemTracker::Simple, DqnAllocator *block_allocator_ = DQN_DEFAULT_ALLOCATOR) { LazyInit(size, clear, flags_, params, block_allocator_); }
+    void LazyInit(isize size, Dqn::ZeroMem clear, u32 flags_ = 0, DqnMemTracker::Params params = DqnMemTracker::Simple, DqnAllocator *block_allocator_ = DQN_DEFAULT_ALLOCATOR);
 
     // Allocation
     // =============================================================================================
@@ -998,10 +1051,11 @@ struct DqnMemStack
         Tail,    // Ignores the AllocMode, always allocate from the end of the memory block
     };
 
+    // NOTE: Prefer the macro to enable allocation tagging if defined.
     // Allocate memory from the MemStack.
     // alignment: Must be a power of 2, ptr returned from allocator is address aligned to this value.
     // return:    Ptr to memory, nullptr if out of space and is disallowed to expand OR the stack is full and malloc fails
-    void *Push              (usize size, PushType push_type = PushType::Default, u8 alignment = 4);
+    void *Push_             (usize size, PushType push_type = PushType::Default, u8 alignment = 4);
 
     // On Push, if push_type is PushType::Default, it will behave according to the AllocMode last set.
     void  SetAllocMode      (AllocMode mode)                                    { if (mode == AllocMode::Head) flags &= ~Flag::DefaultAllocateTail; else flags |= Flag::DefaultAllocateTail; }
@@ -1012,7 +1066,7 @@ struct DqnMemStack
     // from the head, it will not find the right block to pop from and assert.
     void  Pop               (void *ptr, Dqn::ZeroMem zero = Dqn::ZeroMem::No); // Free the ptr. MUST be the last allocated ptr on the block head or tail, assert otherwise.
     void  PopBlock          ()                                                 { FreeBlock(block); }
-    void  Free              ()                                                 { if (flags & Flag::BoundsGuard) DqnMem_Free(tracker.ptrs); while (block_allocator && block) PopBlock(); }
+    void  Free              ()                                                 { tracker.Free(); while (block_allocator && block) PopBlock(); }
     bool  FreeBlock         (DqnMemStack::Block *mem_block);
     void  Reset             (Dqn::ZeroMem zero)                                { while(block && block->prev_block) PopBlock(); ClearCurrBlock(zero); }
     void  ResetTail         ();                                                // Reset just the tail
@@ -1051,10 +1105,11 @@ struct DqnMemStack
 struct DqnLogger
 {
 #define LOG_TYPES \
-    X(Warning, "WARN ") \
-    X(Error,   "ERROR") \
-    X(Debug,   "DEBUG") \
-    X(Message, "MSG  ")
+    X(Warning, "WARN  ") \
+    X(Error,   "ERROR ") \
+    X(Debug,   "DEBUG ") \
+    X(Memory,  "MEMORY") \
+    X(Message, "MSG   ")
 
 #define X(type, prefix) type,
     enum struct Type { LOG_TYPES };
@@ -1075,7 +1130,7 @@ struct DqnLogger
         int   filename_len;
         char *function;
         int   function_len;
-        int   line_number;
+        int   line_num;
     };
 
     #define DQN_LOGGER_CONTEXT {__FILE__, DQN_CHAR_COUNT(__FILE__), __func__, DQN_CHAR_COUNT(__func__), __LINE__}
@@ -1083,6 +1138,7 @@ struct DqnLogger
     #define DQN_LOGGER_W(logger, fmt, ...) (logger)->Log(DqnLogger::Type::Warning, {__FILE__, DQN_CHAR_COUNT(__FILE__), __func__, DQN_CHAR_COUNT(__func__), __LINE__}, fmt, ## __VA_ARGS__)
     #define DQN_LOGGER_E(logger, fmt, ...) (logger)->Log(DqnLogger::Type::Error,   {__FILE__, DQN_CHAR_COUNT(__FILE__), __func__, DQN_CHAR_COUNT(__func__), __LINE__}, fmt, ## __VA_ARGS__)
     #define DQN_LOGGER_M(logger, fmt, ...) (logger)->Log(DqnLogger::Type::Message, {__FILE__, DQN_CHAR_COUNT(__FILE__), __func__, DQN_CHAR_COUNT(__func__), __LINE__}, fmt, ## __VA_ARGS__)
+    #define DQN_LOGGER(logger, type, fmt, ...) (logger)->Log(type, {__FILE__, DQN_CHAR_COUNT(__FILE__), __func__, DQN_CHAR_COUNT(__func__), __LINE__}, fmt, ## __VA_ARGS__)
 
     DqnMemStack        allocator;
     DqnFixedString1024 log_builder;
@@ -1325,7 +1381,6 @@ struct DqnString
     wchar_t *ToWChar(DqnAllocator *allocator = DQN_DEFAULT_ALLOCATOR) const;
 
 };
-
 
 // #DqnRnd
 // =================================================================================================
@@ -1988,6 +2043,12 @@ DQN_FILE_SCOPE DqnJson DqnJson_Get             (DqnJson const input, DqnSlice<ch
 // return:   The array item.
 DQN_FILE_SCOPE DqnJson DqnJson_GetNextArrayItem(DqnJson *iterator);
 
+struct DqnLibContext
+{
+    DqnAllocator         allocator = DqnAllocator(DqnAllocator::Type::XAllocator);
+    DqnLogger            logger;
+};
+
 #endif  /* DQN_H */
 
 // #XPlatform (Win32 & Unix)
@@ -2412,8 +2473,8 @@ DQN_FILE_SCOPE bool   DqnFile_ReadAll(wchar_t const *path, u8 *buf, usize buf_si
 // return: False if file access failure OR nullptr arguments.
 DQN_FILE_SCOPE u8    *DqnFile_ReadAll(char    const *path, usize *buf_size, DqnAllocator *allocator = DQN_DEFAULT_ALLOCATOR);
 DQN_FILE_SCOPE u8    *DqnFile_ReadAll(wchar_t const *path, usize *buf_size, DqnAllocator *allocator = DQN_DEFAULT_ALLOCATOR);
-DQN_FILE_SCOPE u8    *DqnFile_ReadAll(wchar_t const *path, usize *buf_size, DqnMemStack *stack, DqnMemStack::PushType push_type = DqnMemStack::PushType::Head);
-DQN_FILE_SCOPE u8    *DqnFile_ReadAll(char    const *path, usize *buf_size, DqnMemStack *stack, DqnMemStack::PushType push_type = DqnMemStack::PushType::Head);
+DQN_FILE_SCOPE u8    *DqnFile_ReadAll(wchar_t const *path, usize *buf_size, DqnMemStack *stack);
+DQN_FILE_SCOPE u8    *DqnFile_ReadAll(char    const *path, usize *buf_size, DqnMemStack *stack);
 
 DQN_FILE_SCOPE bool  DqnFile_WriteAll(char    const *path, u8 const *buf, usize const buf_size);
 DQN_FILE_SCOPE bool  DqnFile_WriteAll(wchar_t const *path, u8 const *buf, usize const buf_size);
@@ -2749,87 +2810,15 @@ DQN_FILE_SCOPE u64  DqnWin32_EpochTimeLocal        ();
 #include <stdlib.h>  // For calloc, malloc, free
 #include <stdio.h>   // For printf
 
+DqnLibContext dqn_lib_context__;
+DqnLibContext *dqn_lib_context_ = &dqn_lib_context__;
+
 // NOTE: STB_SPRINTF is included when DQN_IMPLEMENTATION defined
 // #define STB_SPRINTF_IMPLEMENTATION
 
 // NOTE: DQN_INI_IMPLEMENTATION modified to be included when DQN_IMPLEMENTATION defined
 // #define DQN_INI_IMPLEMENTATION
 #define DQN_INI_STRLEN(s) DqnStr_Len(s)
-
-DqnLogger dqn_logger_ = {};
-
-// #DqnLog
-// =================================================================================================
-DQN_FILE_SCOPE void DqnLog(char const *file, char const *function_name, i32 line_num,
-                           char const *msg, ...)
-{
-    // TODO(doyle): Compress this
-    auto file_len = DqnStr_Len(file);
-    for (auto i = file_len - 1; i >= 0; i--)
-    {
-        if (file[i] == '\\' || file[i] == '/')
-        {
-            file = file + i + 1;
-            break;
-        }
-    }
-
-    char user_msg[2048];
-    user_msg[0] = '\0';
-
-    va_list va;
-    va_start(va, msg);
-    {
-        u32 num_copied = Dqn_vsprintf(user_msg, msg, va);
-        if (num_copied > DQN_ARRAY_COUNT(user_msg))
-        {
-            (*((int *)0)) = 0;
-        }
-    }
-    va_end(va);
-
-    char const *const fmt_str = "%s:%s,%d: DqnLog: %s\n";
-    fprintf(stderr, fmt_str, file, function_name, line_num, user_msg);
-
-    #if defined(DQN_PLATFORM_IMPLEMENTATION) && defined(DQN_IS_WIN32)
-        DqnWin32_OutputDebugString(fmt_str, file, function_name, line_num, user_msg);
-    #endif
-}
-
-DQN_FILE_SCOPE void DqnLogExpr(char const *file, char const *function_name, i32 line_num,
-                               char const *expr, char const *msg, ...)
-{
-    auto file_len = DqnStr_Len(file);
-    for (isize i = file_len - 1; i >= 0; i--)
-    {
-        if (file[i] == '\\' || file[i] == '/')
-        {
-            file = file + i + 1;
-            break;
-        }
-    }
-
-    char user_msg[2048];
-    user_msg[0] = '\0';
-
-    va_list va;
-    va_start(va, msg);
-    {
-        u32 num_copied = Dqn_vsprintf(user_msg, msg, va);
-        if (num_copied > DQN_ARRAY_COUNT(user_msg))
-        {
-            (*((int *)0)) = 0;
-        }
-    }
-    va_end(va);
-
-    char const *const fmt_str = ":%s:%s,%d(%s): DqnLog: %s\n";
-    fprintf(stderr, fmt_str, file, function_name, line_num, expr, user_msg);
-
-    #if defined(DQN_PLATFORM_IMPLEMENTATION) && defined(DQN_IS_WIN32)
-        DqnWin32_OutputDebugString(fmt_str, file, function_name, line_num, expr, user_msg);
-    #endif
-}
 
 // #DqnMemory
 // =================================================================================================
@@ -2841,9 +2830,24 @@ DQN_FILE_SCOPE void *DqnMem_Alloc(usize size)
     return result;
 }
 
+DQN_FILE_SCOPE void *DqnMem_XAlloc(usize size)
+{
+    void *result = malloc(size);
+    DQN_ALWAYS_ASSERT(result);
+    return result;
+}
+
+
 DQN_FILE_SCOPE void *DqnMem_Calloc(usize size)
 {
     void *result = calloc(1, size);
+    return result;
+}
+
+DQN_FILE_SCOPE void *DqnMem_XCalloc(usize size)
+{
+    void *result = calloc(1, size);
+    DQN_ALWAYS_ASSERT(result);
     return result;
 }
 
@@ -2858,6 +2862,13 @@ DQN_FILE_SCOPE void DqnMem_Clear(void *memory, u8 clear_val, usize size)
 DQN_FILE_SCOPE void *DqnMem_Realloc(void *memory, usize new_size)
 {
     void *result = realloc(memory, new_size);
+    return result;
+}
+
+DQN_FILE_SCOPE void *DqnMem_XRealloc(void *memory, usize new_size)
+{
+    void *result = realloc(memory, new_size);
+    DQN_ALWAYS_ASSERT(result);
     return result;
 }
 
@@ -2907,6 +2918,13 @@ DQN_FILE_SCOPE void *DqnAllocator::Malloc(size_t size, Dqn::ZeroMem zero)
     switch(this->type)
     {
         case Type::None:        (zero == Dqn::ZeroMem::Yes) ? result = DqnMem_Alloc(size) : result = DqnMem_Calloc(size); break;
+        case Type::XAllocator:
+        {
+            (zero == Dqn::ZeroMem::Yes) ? result = DqnMem_Alloc(size) : result = DqnMem_Calloc(size);
+            DQN_ASSERT(result);
+        }
+        break;
+
         case Type::VirtualMemory:
         {
             #if defined(DQN_PLATFORM_HEADER)
@@ -2921,7 +2939,7 @@ DQN_FILE_SCOPE void *DqnAllocator::Malloc(size_t size, Dqn::ZeroMem zero)
         case Type::DqnMemStack:
         {
             auto *mem_stack = reinterpret_cast<DqnMemStack *>(user_context);
-            result = mem_stack->Push(size);
+            result = DQN_MEMSTACK_PUSH(mem_stack, size);
             if (zero == Dqn::ZeroMem::Yes) DqnMem_Clear(result, 0, size);
         }
         break;
@@ -2936,14 +2954,20 @@ DQN_FILE_SCOPE void *DqnAllocator::Realloc(void *ptr, size_t new_size)
     switch(this->type)
     {
         case Type::None:          result = DqnMem_Realloc(ptr, new_size); break;
+        case Type::XAllocator:
+        {
+            result = DqnMem_Realloc(ptr, new_size);
+            DQN_ASSERT(result);
+        }
+        break;
         case Type::VirtualMemory: DQN_ASSERTM(DQN_INVALID_CODE_PATH, "Realloc is disallowed on virtual memory! Reserve a bigger range!"); break;
         case Type::DqnMemStack:
         {
             auto *mem_stack          = reinterpret_cast<DqnMemStack *>(user_context);
             DqnPtrHeader *ptr_header = mem_stack->tracker.PtrToHeader(static_cast<char *>(ptr));
-            result                   = mem_stack->Push(new_size);
+            result                   = DQN_MEMSTACK_PUSH(mem_stack, new_size);
             DqnMem_Copy(result, ptr, ptr_header->alloc_amount);
-            DQN_LOGGER_W(&dqn_logger_, "Memory stack used realloc and ptr: %p with: %zu bytes has been lost", ptr, ptr_header->alloc_amount);
+            DQN_LOGGER_W(&dqn_lib_context_->logger, "Memory stack used realloc and ptr: %p with: %zu bytes has been lost", ptr, ptr_header->alloc_amount);
         }
         break;
         default: DQN_ASSERTM(DQN_INVALID_CODE_PATH, "New context type not handled."); break;
@@ -2974,36 +2998,128 @@ DQN_FILE_SCOPE void DqnAllocator::Free(void *ptr, size_t old_size)
 
 // #DqnMemTracker
 // =================================================================================================
-void DqnMemTracker::Init(bool bounds_guard)
+// TODO(doyle): We shouldn't be using the library context for allocations since this is per
+// allocator or actually maybe yes? I think we want more granularity then that
+void DqnMemTracker::Init(DqnMemTracker::Params params)
 {
-    // TODO(doyle): How to handle memory here.
-    if (bounds_guard)
+    *this = {};
+    this->bounds_guard_size = (params & DqnMemTracker::BoundsGuard) ? sizeof(HEAD_GUARD_VALUE) : 0;
+
+    if (params & DqnMemTracker::TrackPtr)
     {
-        this->bounds_guard_size = sizeof(HEAD_GUARD_VALUE);
-        this->ptrs_len          = 0;
-        this->ptrs_max          = 1024;
-        this->ptrs              = (void **)DqnMem_Alloc(this->ptrs_max * sizeof(this->ptrs));
+        this->ptrs_max = 8192;
+        this->ptrs     = (void **)dqn_lib_context_->allocator.Malloc(this->ptrs_max * sizeof(this->ptrs));
     }
-    else
+
+    if (params & DqnMemTracker::TagAllocation)
     {
-        this->bounds_guard_size = 0;
+        this->tagged_allocs_max = 4096;
+        this->tagged_allocs = (decltype(this->tagged_allocs))dqn_lib_context_->allocator.Malloc(this->tagged_allocs_max * sizeof(*this->tagged_allocs));
+        this->tagged_allocs_used_list = (decltype(this->tagged_allocs_used_list))dqn_lib_context_->allocator.Malloc(this->tagged_allocs_max * sizeof(*this->tagged_allocs_used_list));
     }
 }
 
-void DqnMemTracker::AddAllocation(char *ptr)
+void DqnMemTracker::Free()
 {
-    if (this->ptrs_len + 1 > this->ptrs_max)
+    if (this->IsTaggingAllocations())
     {
-        this->ptrs_max *= 2;
-        this->ptrs = (void **)DqnMem_Realloc(this->ptrs, sizeof(this->ptrs) * this->ptrs_max);
-        DQN_ASSERT(this->ptrs);
+        DQN_FOR_EACH(i, this->tagged_allocs_used_index)
+        {
+            u16 used_index = this->tagged_allocs_used_list[i];
+            for (TaggedAllocation *tagged_alloc = this->tagged_allocs[used_index]; tagged_alloc;)
+            {
+                TaggedAllocation *tag_to_free = tagged_alloc;
+                tagged_alloc                  = tagged_alloc->next;
+                dqn_lib_context_->allocator.Free(tag_to_free->filename.str, tag_to_free->filename.len);
+                dqn_lib_context_->allocator.Free(tag_to_free->function.str, tag_to_free->function.len);
+                dqn_lib_context_->allocator.Free(tag_to_free, sizeof(tag_to_free));
+            }
+        }
     }
 
-    this->ptrs[this->ptrs_len++] = ptr;
+    if (this->IsTrackingPtrs())
+        dqn_lib_context_->allocator.Free(this->ptrs, sizeof(*this->ptrs) * ptrs_max);
 }
 
-void DqnMemTracker::RemoveAllocation(char *ptr)
+void DqnMemTracker::Tag_(DqnBuffer<const char> filename, DqnBuffer<const char> function, int line_num, DqnBuffer<const char> filename_line_num_data, isize bytes)
 {
+    u16 index = DqnHash_Murmur32(filename_line_num_data.data, filename_line_num_data.len) % this->tagged_allocs_max;
+    TaggedAllocation **entry = this->tagged_allocs + index;
+    for (; *entry && (*entry)->filename.len > 0; entry = &((*entry)->next))
+    {
+        if (line_num == (*entry)->line_num && DQN_BUFFER_STRCMP(filename, (*entry)->filename, Dqn::IgnoreCase::Yes))
+            break;
+    }
+
+    if (!(*entry))
+        *entry = (TaggedAllocation *)dqn_lib_context_->allocator.Malloc(sizeof(**entry), Dqn::ZeroMem::Yes);
+
+    if ((*entry)->filename.len == 0)
+    {
+        this->tagged_allocs_used_list[this->tagged_allocs_used_index++] = index;
+        (*entry)->filename = DqnBuffer_CopyString(&dqn_lib_context_->allocator, filename.str, filename.len);
+        (*entry)->function = DqnBuffer_CopyString(&dqn_lib_context_->allocator, function.str, function.len);
+        (*entry)->line_num = line_num;
+    }
+
+    (*entry)->bytes_allocated += bytes;
+    DQN_ALWAYS_ASSERT((*entry)->bytes_allocated >= 0);
+
+    DqnLogger::Context context = {};
+    context.filename           = (*entry)->filename.str;
+    context.filename_len       = (*entry)->filename.len;
+    context.function           = (*entry)->function.str;
+    context.function_len       = (*entry)->function.len;
+    context.line_num           = line_num;
+    dqn_lib_context_->logger.Log(DqnLogger::Type::Memory, context, "Currently allocated: %zu bytes", (*entry)->bytes_allocated);
+}
+
+void *DqnMemTracker::SetupPtr(void *ptr, isize size, u8 alignment)
+{
+    // Calculate the aligned ptr
+    auto *byte_ptr         = static_cast<char *>(ptr);
+    auto *unaligned_result = static_cast<char *>(ptr) + sizeof(DqnPtrHeader) + this->bounds_guard_size;
+    auto *aligned_result   = reinterpret_cast<char *>(DQN_ALIGN_POW_N(unaligned_result, alignment));
+    isize const offset_to_ptr_header = aligned_result - unaligned_result;
+    DQN_ASSERT(offset_to_ptr_header >= 0 && offset_to_ptr_header <= (alignment - 1));
+
+    char *check_allignment = reinterpret_cast<char *>(DQN_ALIGN_POW_N(aligned_result, alignment));
+    DQN_ASSERTM(check_allignment == aligned_result, "Adding bounds guard should not destroy alignment! %p != %p", aligned_result, check_allignment);
+    // Instrument allocation with guards and tracker
+    {
+        auto *ptr_header              = reinterpret_cast<DqnPtrHeader *>(byte_ptr + offset_to_ptr_header);
+        ptr_header->offset_to_src_ptr = static_cast<u8>(aligned_result - byte_ptr);
+        ptr_header->alignment         = alignment;
+        ptr_header->alloc_amount      = size;
+    }
+
+    if (this->IsGuardingBounds())
+    {
+        u32 *head_guard = reinterpret_cast<u32 *>(aligned_result - sizeof(DqnMemTracker::HEAD_GUARD_VALUE));
+        u32 *tail_guard = reinterpret_cast<u32 *>(aligned_result + size);
+        *head_guard     = DqnMemTracker::HEAD_GUARD_VALUE;
+        *tail_guard     = DqnMemTracker::TAIL_GUARD_VALUE;
+    }
+
+    if (this->IsTrackingPtrs())
+    {
+        if (this->ptrs_len + 1 > this->ptrs_max)
+        {
+            this->ptrs_max *= 2;
+            this->ptrs = (void **)DqnMem_XRealloc(this->ptrs, sizeof(this->ptrs) * this->ptrs_max);
+        }
+        this->ptrs[this->ptrs_len++] = aligned_result;
+        this->CheckPtrs();
+    }
+
+    return aligned_result;
+}
+
+void DqnMemTracker::RemovePtr(void *ptr)
+{
+    if (!this->IsTrackingPtrs())
+        return;
+
     DQN_ASSERT(this->ptrs_len > 0);
 
     b32 found = false;
@@ -3020,7 +3136,21 @@ void DqnMemTracker::RemoveAllocation(char *ptr)
     DQN_ALWAYS_ASSERTM(found, "Ptr %p was not in the tracked pointers list", ptr);
 }
 
-void DqnMemTracker::CheckAllocations() const
+void DqnMemTracker::RemovePtrRange(void *start, void *end)
+{
+    if (!this->IsTrackingPtrs())
+        return;
+
+    if (start >= end) return;
+    DQN_FOR_EACH(i, this->ptrs_len)
+    {
+        void *ptr = this->ptrs[i];
+        if (ptr >= start && ptr < end)
+            this->ptrs[i--] = this->ptrs[--this->ptrs_len];
+    }
+}
+
+void DqnMemTracker::CheckPtrs() const
 {
     DQN_FOR_EACH(i, this->ptrs_len)
     {
@@ -3054,10 +3184,10 @@ DqnMemStack__AllocateBlock(isize size, Dqn::ZeroMem zero, DqnAllocator *allocato
     return result;
 }
 
-DqnMemStack::DqnMemStack(void *mem, isize size, Dqn::ZeroMem clear, u32 flags_)
+DqnMemStack::DqnMemStack(void *mem, isize size, Dqn::ZeroMem clear, u32 flags_, DqnMemTracker::Params params)
 {
     DQN_ALWAYS_ASSERTM(mem, "Supplied fixed memory buffer is nullptr, initialise with fixed memory failed");
-    DQN_ALWAYS_ASSERTM(size > DQN_SIZEOF(DqnMemStack::Block), "(%zu < %zu) Buffer too small for block metadata", size, DQN_SIZEOF(DqnMemStack::Block));
+    DQN_ALWAYS_ASSERTM(size > sizeof(DqnMemStack::Block), "[%zu < %zu] Buffer too small for block metadata", size, sizeof(DqnMemStack::Block));
     *this = {};
 
     if (clear == Dqn::ZeroMem::Yes)
@@ -3069,23 +3199,20 @@ DqnMemStack::DqnMemStack(void *mem, isize size, Dqn::ZeroMem clear, u32 flags_)
     this->block  = static_cast<DqnMemStack::Block *>(mem);
     *this->block = Block(block_offset, block_size);
     this->flags  = (flags_ | Flag::NonExpandable);
-
-    bool bounds_guard = (this->flags & Flag::BoundsGuard) > 0;
-    this->tracker.Init(bounds_guard);
+    this->tracker.Init(params);
 }
 
-void DqnMemStack::LazyInit(isize size, Dqn::ZeroMem clear, u32 flags_, DqnAllocator *block_allocator_)
+void DqnMemStack::LazyInit(isize size, Dqn::ZeroMem clear, u32 flags_, DqnMemTracker::Params params, DqnAllocator *block_allocator_)
 {
     DQN_ALWAYS_ASSERTM(size > 0, "%zu <= 0", size);
     *this                 = {};
     this->block           = DqnMemStack__AllocateBlock(size, clear, block_allocator_);
     this->flags           = flags_;
     this->block_allocator = block_allocator_;
-    bool bounds_guard     = (this->flags & Flag::BoundsGuard);
-    this->tracker.Init(bounds_guard);
+    this->tracker.Init(params);
 }
 
-void *DqnMemStack::Push(usize size, PushType push_type, u8 alignment)
+void *DqnMemStack::Push_(usize size, PushType push_type, u8 alignment)
 {
     DQN_ASSERT(size >= 0 && (alignment % 2 == 0));
     DQN_ALWAYS_ASSERTM(alignment <= 128, "Alignment _not_ supported. Update metadata to use u16 for storing the offset!");
@@ -3094,7 +3221,7 @@ void *DqnMemStack::Push(usize size, PushType push_type, u8 alignment)
         return nullptr;
 
     if (!this->block)
-        this->LazyInit(MINIMUM_BLOCK_SIZE, Dqn::ZeroMem::Yes, Flag::DefaultFlags, DQN_DEFAULT_ALLOCATOR);
+        this->LazyInit(MINIMUM_BLOCK_SIZE, Dqn::ZeroMem::Yes);
 
     usize size_to_alloc = this->tracker.GetAllocationSize(size, alignment);
     bool push_to_head   = true;
@@ -3131,12 +3258,9 @@ void *DqnMemStack::Push(usize size, PushType push_type, u8 alignment)
 
     // Calculate Ptr To Give Client
     // =============================================================================================
-    char *src_ptr          = (push_to_head) ? (this->block->head) : (this->block->tail - size_to_alloc);
-    char *unaligned_result = src_ptr + sizeof(DqnPtrHeader) + this->tracker.bounds_guard_size;
-    char *aligned_result   = reinterpret_cast<char *>(DQN_ALIGN_POW_N(unaligned_result, alignment));
-
-    isize const offset_to_ptr_header = aligned_result - unaligned_result;
-    DQN_ASSERT(offset_to_ptr_header >= 0 && offset_to_ptr_header <= (alignment - 1));
+    char *src_ptr        = (push_to_head) ? (this->block->head) : (this->block->tail - size_to_alloc);
+    void *aligned_result = this->tracker.SetupPtr(src_ptr, size, alignment);
+    this->tracker.PtrToHeader((char *)aligned_result)->alloc_type = (push_to_head) ? 0 : 1;
 
     if (push_to_head)
     {
@@ -3149,59 +3273,7 @@ void *DqnMemStack::Push(usize size, PushType push_type, u8 alignment)
         DQN_ASSERT(this->block->tail >= this->block->head);
     }
 
-    // Instrument allocation with guards and tracker
-    // =============================================================================================
-    {
-        auto *ptr_header              = reinterpret_cast<DqnPtrHeader *>(src_ptr + offset_to_ptr_header);
-        ptr_header->offset_to_src_ptr = static_cast<u8>(aligned_result - src_ptr);
-        ptr_header->alignment         = alignment;
-        ptr_header->alloc_type        = (push_to_head) ? 0 : 1;
-        ptr_header->alloc_amount      = size;
-
-        if (this->flags & DqnMemStack::Flag::BoundsGuard)
-        {
-            u32 *head_guard = reinterpret_cast<u32 *>(aligned_result - sizeof(DqnMemTracker::HEAD_GUARD_VALUE));
-            u32 *tail_guard = reinterpret_cast<u32 *>(aligned_result + ptr_header->alloc_amount);
-            *head_guard     = DqnMemTracker::HEAD_GUARD_VALUE;
-            *tail_guard     = DqnMemTracker::TAIL_GUARD_VALUE;
-        }
-    }
-
-    // Debug check (alignment, bounds guard)
-    // =============================================================================================
-    {
-        char *check_allignment = reinterpret_cast<char *>(DQN_ALIGN_POW_N(aligned_result, alignment));
-        DQN_ASSERTM(check_allignment == aligned_result, "Adding bounds guard should not destroy alignment! %p != %p", aligned_result, check_allignment);
-
-        if (this->flags & Flag::BoundsGuard)
-        {
-            this->tracker.AddAllocation(aligned_result);
-            this->tracker.CheckAllocations();
-        }
-    }
-
     return aligned_result;
-}
-
-FILE_SCOPE void DqnMemStack__KillTrackedPtrsInRange(DqnMemTracker *tracker, char const *start, char const *end)
-{
-    if (start >= end) return;
-
-    DQN_FOR_EACH(i, tracker->ptrs_len)
-    {
-        char *ptr = static_cast<char *>(tracker->ptrs[i]);
-        if (ptr >= start && ptr < end)
-        {
-            tracker->ptrs[i--] = tracker->ptrs[--tracker->ptrs_len];
-        }
-    }
-}
-
-FILE_SCOPE void DqnMemStack__KillTrackedPtrsInBlock(DqnMemTracker *tracker, DqnMemStack::Block const *block)
-{
-    char const *block_start = block->memory;
-    char const *block_end   = block->memory + block->size;
-    DqnMemStack__KillTrackedPtrsInRange(tracker, block_start, block_end);
 }
 
 void DqnMemStack::Pop(void *ptr, Dqn::ZeroMem clear)
@@ -3209,31 +3281,27 @@ void DqnMemStack::Pop(void *ptr, Dqn::ZeroMem clear)
     if (!ptr) return;
 
     char *byte_ptr           = static_cast<char *>(ptr);
-    DqnPtrHeader *ptr_header = reinterpret_cast<DqnPtrHeader *>(byte_ptr - sizeof(*ptr_header));
+    DqnPtrHeader *ptr_header = reinterpret_cast<DqnPtrHeader *>(byte_ptr - sizeof(*ptr_header) - this->tracker.bounds_guard_size);
 
     // Check instrumented data
-    if (this->flags & Flag::BoundsGuard)
-    {
-        this->tracker.CheckAllocations();
-        this->tracker.RemoveAllocation(byte_ptr);
-        ptr_header = reinterpret_cast<DqnPtrHeader *>(reinterpret_cast<char *>(ptr_header) - this->tracker.bounds_guard_size);
-    }
+    this->tracker.CheckPtrs();
+    this->tracker.RemovePtr(byte_ptr);
 
-    isize full_allocation_size = this->tracker.GetAllocationSize(ptr_header->alloc_amount, ptr_header->alignment);
-    char *start = byte_ptr - ptr_header->offset_to_src_ptr;
-    char *end   = start + full_allocation_size;
+    isize full_alloc_size = this->tracker.GetAllocationSize(ptr_header->alloc_amount, ptr_header->alignment);
+    char *start           = byte_ptr - ptr_header->offset_to_src_ptr;
+    char *end             = start + full_alloc_size;
     char const *block_end = this->block->memory + this->block->size;
 
     if (ptr_header->alloc_type == 0)
     {
         DQN_ASSERTM(end == this->block->head, "Pointer to pop was not the last allocation! %p != %p", end, this->block->head);
-        this->block->head -= full_allocation_size;
+        this->block->head -= full_alloc_size;
         DQN_ASSERT(this->block->head >= this->block->memory);
     }
     else
     {
         DQN_ASSERTM(start == this->block->tail, "Pointer to pop was not the last allocation! %p != %p", start, this->block->tail);
-        this->block->tail += full_allocation_size;
+        this->block->tail += full_alloc_size;
         DQN_ASSERT(this->block->tail <= block_end);
     }
 
@@ -3262,13 +3330,8 @@ bool DqnMemStack::FreeBlock(DqnMemStack::Block *mem_block)
         DqnMemStack::Block *block_to_free = *block_ptr;
         (*block_ptr)                       = block_to_free->prev_block;
 
-        if (this->flags & Flag::BoundsGuard)
-        {
-            DqnMemStack__KillTrackedPtrsInBlock(&this->tracker, block_to_free);
-        }
-
+        this->tracker.RemovePtrRange(block_to_free->memory, block_to_free->memory + block_to_free->size);
         isize real_size = block_to_free->size + sizeof(DqnMemStack::Block);
-        (void)real_size;
         this->block_allocator->Free(block_to_free, real_size);
 
         // No more blocks, then last block has been freed
@@ -3283,9 +3346,7 @@ void DqnMemStack::ResetTail()
 {
     char *start = this->block->tail;
     char *end   = this->block->memory + this->block->size;
-    if (this->flags & Flag::BoundsGuard)
-        DqnMemStack__KillTrackedPtrsInRange(&this->tracker, start, end);
-
+    this->tracker.RemovePtrRange(start, end);
     this->block->tail = end;
 }
 
@@ -3293,9 +3354,7 @@ void DqnMemStack::ClearCurrBlock(Dqn::ZeroMem zero)
 {
     if (this->block)
     {
-        if (this->flags & Flag::BoundsGuard)
-            DqnMemStack__KillTrackedPtrsInBlock(&this->tracker, this->block);
-
+        this->tracker.RemovePtrRange(this->block->memory, this->block->memory + this->block->size);
         this->block->head = this->block->memory;
         this->block->tail = this->block->memory + this->block->size;
         if (zero == Dqn::ZeroMem::Yes)
@@ -3358,12 +3417,9 @@ void DqnMemStack::MemRegionEnd(MemRegion region)
         this->block->head = region.starting_block_head;
         this->block->tail = region.starting_block_tail;
 
-        if (this->flags & DqnMemStack::Flag::BoundsGuard)
-        {
-            char *block_start = this->block->head;
-            char *block_end   = this->block->tail;
-            DqnMemStack__KillTrackedPtrsInRange(&this->tracker, block_start, block_end);
-        }
+        char *start = this->block->head;
+        char *end   = this->block->tail;
+        this->tracker.RemovePtrRange(start, end);
     }
 }
 
@@ -5289,6 +5345,20 @@ void DqnString::Append(char const *src, int len_)
     this->str[this->len] = 0;
 }
 
+DQN_FILE_SCOPE DqnBuffer<char> DqnBuffer_CopyString(DqnAllocator *allocator, char const *str, int len)
+{
+    if (len == -1)
+        len = DqnStr_Len(str);
+
+    DqnBuffer<char> result;
+    result.len = len;
+    result.str = static_cast<char *>(allocator->Malloc((len + 1) * sizeof(*str), Dqn::ZeroMem::No));
+    DqnMem_Copy(result.str, str, len);
+    result.str[len] = 0;
+
+    return result;
+}
+
 // #DqnFixedString Implementation
 // =================================================================================================
 // return: The number of bytes written to dest
@@ -5343,13 +5413,15 @@ char const *DqnLogger::Log(Type type, Context const log_context, char const *fmt
 char const *DqnLogger::LogVA(Type type, Context const log_context, char const *fmt, va_list va)
 {
     if (!this->allocator.block)
-        this->allocator.LazyInit(DqnMemStack::MINIMUM_BLOCK_SIZE, Dqn::ZeroMem::No, DqnMemStack::Flag::DefaultFlags);
+    {
+        this->allocator.LazyInit(DqnMemStack::MINIMUM_BLOCK_SIZE, Dqn::ZeroMem::No, 0, DqnMemTracker::None);
+    }
 
     if (this->log_buf.len == 0)
     {
         this->log_buf_index = 0;
         this->log_buf.len   = 2048;
-        this->log_buf.data  = DQN_MEMSTACK_PUSH_ARRAY(&this->allocator, char, sizeof(*this->log_buf.data) * this->log_buf.len);
+        this->log_buf.data  = (char *)this->allocator.Push_(sizeof(*this->log_buf.data) * this->log_buf.len);
     }
 
     bool const have_context = (log_context.filename_len > 0);
@@ -5375,7 +5447,7 @@ char const *DqnLogger::LogVA(Type type, Context const log_context, char const *f
 
     if (have_context)
     {
-        required_len += Dqn_snprintf(nullptr, 0, "%s|%05d|%s|`%s`: ", filename, log_context.line_number, TypePrefix(type), log_context.function);
+        required_len += Dqn_snprintf(nullptr, 0, "%s|%05d|%s|`%s`: ", filename, log_context.line_num, TypePrefix(type), log_context.function);
     }
 
     required_len += Dqn_snprintf(nullptr, 0, "%s", this->log_builder.str);
@@ -5384,7 +5456,7 @@ char const *DqnLogger::LogVA(Type type, Context const log_context, char const *f
 
     // Build string
     this->allocator.SetAllocMode(DqnMemStack::AllocMode::Tail);
-    char *result = DQN_MEMSTACK_PUSH_ARRAY(&this->allocator, char, required_len);
+    char *result = (char *)this->allocator.Push_(sizeof(char) * required_len);
     this->allocator.SetAllocMode(DqnMemStack::AllocMode::Head);
     DQN_DEFER { this->allocator.Pop(result); };
 
@@ -5395,7 +5467,7 @@ char const *DqnLogger::LogVA(Type type, Context const log_context, char const *f
 #if defined(DQN_PLATFORM_HEADER) && defined(DQN_IS_WIN32)
         result_ptr += Dqn_sprintf(result_ptr, "%02d-%02d-%02d|%02d:%02d:%02d|", sys_time.wYear % 100, sys_time.wMonth, sys_time.wDay, sys_time.wHour, sys_time.wMinute, sys_time.wSecond);
 #endif
-        result_ptr += Dqn_sprintf(result_ptr, "%s|%05d|%s|`%s`: ", filename, log_context.line_number, TypePrefix(type), log_context.function);
+        result_ptr += Dqn_sprintf(result_ptr, "%s|%05d|%s|`%s`: ", filename, log_context.line_num, TypePrefix(type), log_context.function);
     }
 
     result_ptr += Dqn_sprintf(result_ptr, "%s", this->log_builder.str);
@@ -5753,7 +5825,6 @@ DQN_FILE_SCOPE DqnJson DqnJson_GetNextArrayItem(DqnJson *iterator)
 
     return result;
 }
-
 
 #ifdef __GNUC__
     #pragma GCC diagnostic push
@@ -7520,7 +7591,7 @@ DQN_FILE__LIST_DIR(DqnFile__PlatformListDir)
 
         if (!list)
         {
-            DQN_LOGGER_E(&dqn_logger_, "Memory allocation failed, required: %$_d", sizeof(*list) * curr_num_files);
+            DQN_LOGGER_E(&dqn_lib_context_->logger, "Memory allocation failed, required: %$_d", sizeof(*list) * curr_num_files);
             *num_files = 0;
             return nullptr;
         }
@@ -7535,7 +7606,7 @@ DQN_FILE__LIST_DIR(DqnFile__PlatformListDir)
                 DQN_FOR_EACH(j, i)
                     allocator->Free(list[j], bytes_required);
 
-                DQN_LOGGER_E(&dqn_logger_, "Memory allocation failed, required: %$_d", sizeof(**list) * MAX_PATH);
+                DQN_LOGGER_E(&dqn_lib_context_->logger, "Memory allocation failed, required: %$_d", sizeof(**list) * MAX_PATH);
                 *num_files = 0;
                 return nullptr;
             }
@@ -7835,18 +7906,18 @@ DQN_FILE_SCOPE u8 *DqnFile_ReadAll(char const *path, usize *buf_size, DqnAllocat
     return nullptr;
 }
 
-DQN_FILE_SCOPE u8 *DqnFile_ReadAll(wchar_t const *path, usize *buf_size, DqnMemStack *stack, DqnMemStack::PushType push_type)
+DQN_FILE_SCOPE u8 *DqnFile_ReadAll(wchar_t const *path, usize *buf_size, DqnMemStack *stack)
 {
     u8 *result = nullptr;
     DqnFile file = {};
     if (!file.Open(path, DqnFile::Flag::FileRead, DqnFile::Action::OpenOnly))
     {
-        DQN_LOGGER_E(&dqn_logger_, "Could not open file: %s", path);
+        DQN_LOGGER_E(&dqn_lib_context_->logger, "Could not open file: %s", path);
         return result;
     }
     DQN_DEFER { file.Close(); };
 
-    result = static_cast<u8 *>(stack->Push(file.size, push_type));
+    result           = DQN_MEMSTACK_PUSH_ARRAY(stack, u8, file.size);
     usize bytes_read = file.Read(result, file.size);
     if (bytes_read == file.size)
     {
@@ -7854,24 +7925,24 @@ DQN_FILE_SCOPE u8 *DqnFile_ReadAll(wchar_t const *path, usize *buf_size, DqnMemS
     }
     else
     {
-        DQN_LOGGER_E(&dqn_logger_, "bytes_read != file.size", bytes_read, file.size);
+        DQN_LOGGER_E(&dqn_lib_context_->logger, "bytes_read != file.size", bytes_read, file.size);
     }
 
     return result;
 }
 
-DQN_FILE_SCOPE u8 *DqnFile_ReadAll(char const *path, usize *buf_size, DqnMemStack *stack, DqnMemStack::PushType push_type)
+DQN_FILE_SCOPE u8 *DqnFile_ReadAll(char const *path, usize *buf_size, DqnMemStack *stack)
 {
     u8 *result = nullptr;
     DqnFile file = {};
     if (!file.Open(path, DqnFile::Flag::FileRead, DqnFile::Action::OpenOnly))
     {
-        DQN_LOGGER_E(&dqn_logger_, "Could not open file: %s", path);
+        DQN_LOGGER_E(&dqn_lib_context_->logger, "Could not open file: %s", path);
         return result;
     }
     DQN_DEFER { file.Close(); };
 
-    result = static_cast<u8 *>(stack->Push(file.size, push_type));
+    result = DQN_MEMSTACK_PUSH_ARRAY(stack, u8, file.size);
     usize bytes_read = file.Read(result, file.size);
     if (bytes_read == file.size)
     {
@@ -7879,7 +7950,7 @@ DQN_FILE_SCOPE u8 *DqnFile_ReadAll(char const *path, usize *buf_size, DqnMemStac
     }
     else
     {
-        DQN_LOGGER_E(&dqn_logger_, "bytes_read != file.size", bytes_read, file.size);
+        DQN_LOGGER_E(&dqn_lib_context_->logger, "bytes_read != file.size", bytes_read, file.size);
     }
 
     return result;
@@ -7890,7 +7961,7 @@ DQN_FILE_SCOPE bool DqnFile_WriteAll(char const *path, u8 const *buf, usize cons
     DqnFile file = {};
     if (!file.Open(path, DqnFile::Flag::FileReadWrite, DqnFile::Action::ForceCreate))
     {
-        DQN_LOGGER_E(&dqn_logger_, "Could not open file at: %s", path);
+        DQN_LOGGER_E(&dqn_lib_context_->logger, "Could not open file at: %s", path);
         return false;
     }
 
@@ -7898,7 +7969,7 @@ DQN_FILE_SCOPE bool DqnFile_WriteAll(char const *path, u8 const *buf, usize cons
     usize bytes_written = file.Write(buf, buf_size);
     if (bytes_written != buf_size)
     {
-        DQN_LOGGER_E(&dqn_logger_, "Bytes written did not match the buffer size, %zu != %zu", bytes_written, buf_size);
+        DQN_LOGGER_E(&dqn_lib_context_->logger, "Bytes written did not match the buffer size, %zu != %zu", bytes_written, buf_size);
         return false;
     }
 
@@ -7910,7 +7981,7 @@ DQN_FILE_SCOPE bool DqnFile_WriteAll(wchar_t const *path, u8 const *buf, usize c
     DqnFile file = {};
     if (!file.Open(path, DqnFile::Flag::FileReadWrite, DqnFile::Action::ForceCreate))
     {
-        DQN_LOGGER_E(&dqn_logger_, "Could not open file at: %s", path);
+        DQN_LOGGER_E(&dqn_lib_context_->logger, "Could not open file at: %s", path);
         return false;
     }
 
@@ -7918,7 +7989,7 @@ DQN_FILE_SCOPE bool DqnFile_WriteAll(wchar_t const *path, u8 const *buf, usize c
     usize bytes_written = file.Write(buf, buf_size);
     if (bytes_written != buf_size)
     {
-        DQN_LOGGER_E(&dqn_logger_, "Bytes written did not match the buffer size, %zu != %zu", bytes_written, buf_size);
+        DQN_LOGGER_E(&dqn_lib_context_->logger, "Bytes written did not match the buffer size, %zu != %zu", bytes_written, buf_size);
         return false;
     }
 
@@ -7934,7 +8005,7 @@ DQN_FILE_SCOPE bool DqnFile_ReadAll(wchar_t const *path, u8 *buf, usize buf_size
     // TODO(doyle): Logging
     if (file.size > buf_size || !result)
     {
-        DQN_LOGGER_E(&dqn_logger_, "Insufficient buffer size given: %zu, required: %zu\n", buf_size, file.size);
+        DQN_LOGGER_E(&dqn_lib_context_->logger, "Insufficient buffer size given: %zu, required: %zu\n", buf_size, file.size);
         return false;
     }
 
@@ -8600,7 +8671,7 @@ DQN_OS_GET_THREADS_AND_CORES(DqnOS_GetThreadsAndCores)
         auto *raw_proc_info_array = (u8 *)DqnMem_Calloc(required_size);
         if (!raw_proc_info_array)
         {
-            DQN_LOGGER_E(&dqn_logger_, "Could not allocate memory for array required: %$d\n");
+            DQN_LOGGER_E(&dqn_lib_context_->logger, "Could not allocate memory for array required: %$d\n");
             return;
         }
 
@@ -8741,7 +8812,7 @@ DQN_FILE_SCOPE void DqnWin32_GetExeNameAndDirectory(DqnMemStack *allocator, DqnB
 
     i32 offset_to_last_backslash = -1;
     int exe_buf_len              = 512;
-    wchar_t *exe_buf                = nullptr;
+    wchar_t *exe_buf             = nullptr;
     while(offset_to_last_backslash == -1)
     {
         if (exe_buf)
@@ -8749,7 +8820,7 @@ DQN_FILE_SCOPE void DqnWin32_GetExeNameAndDirectory(DqnMemStack *allocator, DqnB
             exe_buf_len += 128;
         }
 
-        exe_buf = (decltype(exe_buf))allocator->Push(exe_buf_len * sizeof(*exe_buf), DqnMemStack::PushType::Tail);
+        exe_buf = DQN_MEMSTACK_PUSH_ARRAY(allocator, wchar_t, exe_buf_len);
         DQN_DEFER { allocator->Pop(exe_buf); };
         offset_to_last_backslash = DqnWin32_GetExeDirectory(exe_buf, exe_buf_len);
     }
