@@ -65,7 +65,7 @@ REM wd4201   Nonstandard extension used: nameless struct/union
 REM wd4189   Local variable is initialised but not referenced
 REM wd4505   Unreferenced local function not used will be removed
 
-set CompileSwitches=/EHa /GR- /Oi /MT /Z7 /W4 /wd4201 /wd4505 /Od
+set CompileSwitches=/EHa /GR- /Oi /MT /Z7 /W4 /wd4201 /wd4505 /O2
 set Defnes=
 
 set CompileFlags=%CompileSwitches% /Fo%BinDir%\%ProjectName% /Fd%BinDir%\%ProjectName% /Fe%BinDir%\%ProjectName%
